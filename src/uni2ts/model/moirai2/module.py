@@ -108,6 +108,7 @@ class Moirai2Module(
             hidden_dims=d_model,
             output_dims=num_predict_token * self.num_quantiles * patch_size,
         )
+        self.get_reprs = False
 
     def forward(
         self,
@@ -157,6 +158,9 @@ class Moirai2Module(
             time_id=time_id,
             var_id=variate_id,
         )
+        if self.get_reprs:
+            preds = self.out_proj(reprs)
+            return (reprs, torch.cat((loc, scale), dim=-1))
         preds = self.out_proj(reprs)
         if training_mode:
             return preds, scaled_target

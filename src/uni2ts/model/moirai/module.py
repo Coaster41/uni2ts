@@ -147,6 +147,7 @@ class MoiraiModule(
         )
         self.distr_output = distr_output
         self.param_proj = self.distr_output.get_param_proj(d_model, patch_sizes)
+        self.get_reprs = False
 
     def forward(
         self,
@@ -193,6 +194,8 @@ class MoiraiModule(
             time_id=time_id,
             var_id=variate_id,
         )
+        if self.get_reprs:
+            return (reprs, torch.cat((loc, scale), dim=-1))
         distr_param = self.param_proj(reprs, patch_size)
         distr = self.distr_output.distribution(distr_param, loc=loc, scale=scale)
         return distr
