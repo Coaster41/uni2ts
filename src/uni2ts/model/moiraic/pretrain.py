@@ -32,13 +32,16 @@ from uni2ts.loss.packed import (
     PackedQuantileMAELoss,
     PackedQuantileLoss,
 )
+
+from einops import rearrange, reduce, repeat
 from uni2ts.module.norm import RMSNorm
 from uni2ts.module.position import (
     BinaryAttentionBias,
     LearnedEmbedding,
     LearnedProjection,
 )
-from uni2ts.module.ts_embed import MultiInSizeLinear, MultiOutSizeLinear
+# from uni2ts.module.ts_embed import MultiInSizeLinear, MultiOutSizeLinear
+from uni2ts.module.ts_embed import ResidualBlock
 from uni2ts.optim import SchedulerType, get_scheduler
 from uni2ts.transform import (
     AddObservedMask,
@@ -158,15 +161,15 @@ class MoiraicPretrain(L.LightningModule):
         :param batch_idx: index of current batch
         :return: training loss for current batch
         """
-        distr = self(
+        preds, scaled_target = self(
             **{field: batch[field] for field in list(self.seq_fields) + ["sample_id"]}
         )
         loss = self.hparams.loss_func(
-            pred=distr,
+            pred=preds,
+            target=scaled_target,
             **{
                 field: batch[field]
                 for field in [
-                    "target",
                     "prediction_mask",
                     "observed_mask",
                     "sample_id",
@@ -201,11 +204,12 @@ class MoiraicPretrain(L.LightningModule):
         :param dataloader_idx:
         :return: validation loss for current batch
         """
-        distr = self(
+        preds = self(
+            training_mode=False,
             **{field: batch[field] for field in list(self.seq_fields) + ["sample_id"]}
         )
         val_loss = self.hparams.loss_func(
-            pred=distr,
+            pred=preds,
             **{
                 field: batch[field]
                 for field in [
@@ -240,10 +244,20 @@ class MoiraicPretrain(L.LightningModule):
             )
             for metric_func in val_metrics:
                 if isinstance(metric_func, PackedPointLoss):
-                    pred = distr.sample(torch.Size((self.hparams.num_samples,)))
+                    pred = preds.sample(torch.Size((self.hparams.num_samples,)))
                     pred = torch.median(pred, dim=0).values
                 elif isinstance(metric_func, PackedDistributionLoss):
-                    pred = distr
+                    pred = preds
+                elif isinstance(metric_func, PackedQuantileLoss):
+                    pred = rearrange(
+                        pred,
+                        "... (predict_token num_quantiles patch_size) -> ... (predict_token patch_size) num_quantiles",
+                        predict_token=self.module.num_predict_token,
+                        num_quantiles=self.module.num_quantiles,
+                        patch_size=self.module.patch_size,
+                    )
+                    pred = torch.median(preds, dim=-1).values
+                    # pred = pred[..., pred.shape[-1] // 2]
                 else:
                     raise ValueError(f"Unsupported loss function: {metric_func}")
 
@@ -287,9 +301,8 @@ class MoiraicPretrain(L.LightningModule):
 
         whitelist_params = (
             LearnedProjection,
-            MultiInSizeLinear,
-            MultiOutSizeLinear,
             nn.Linear,
+            ResidualBlock
         )
         blacklist_params = (
             BinaryAttentionBias,
@@ -395,7 +408,7 @@ class MoiraicPretrain(L.LightningModule):
                 + GetPatchSize(
                     min_time_patches=self.hparams.min_patches,
                     target_field="target",
-                    patch_sizes=self.module.patch_sizes,
+                    patch_sizes=self.module.patch_size,
                     patch_size_constraints=DefaultPatchSizeConstraints(),
                     offset=True,
                 )
@@ -430,7 +443,7 @@ class MoiraicPretrain(L.LightningModule):
                     imputation_method=DummyValueImputation(value=0.0),
                 )
                 + Patchify(
-                    max_patch_size=max(self.module.patch_sizes),
+                    max_patch_size=self.module.patch_size,
                     fields=("target", "observed_mask"),
                     optional_fields=("past_feat_dynamic_real",),
                 )

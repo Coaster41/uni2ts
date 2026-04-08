@@ -78,11 +78,15 @@ class DefaultPatchSizeConstraints(PatchSizeConstraints):
 class GetPatchSize(Transformation):
     min_time_patches: int
     target_field: str = "target"
-    patch_sizes: tuple[int, ...] | list[int] | range = (8, 16, 32, 64, 128)
+    patch_sizes: tuple[int, ...] | list[int] | range | int = (8, 16, 32, 64, 128)
     patch_size_constraints: PatchSizeConstraints = DefaultPatchSizeConstraints()
     offset: bool = True
 
     def __call__(self, data_entry: dict[str, Any]) -> dict[str, Any]:
+        if isinstance(self.patch_sizes, int):
+            data_entry["patch_size"] = self.patch_sizes
+            return data_entry
+        
         freq = data_entry["freq"]
         constraints = self.patch_size_constraints(freq)
         # largest patch size based on min_time_patches
