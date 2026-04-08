@@ -43,6 +43,9 @@ from uni2ts.module.position import (
 # from uni2ts.module.ts_embed import MultiInSizeLinear, MultiOutSizeLinear
 from uni2ts.module.ts_embed import ResidualBlock
 from uni2ts.optim import SchedulerType, get_scheduler
+from gluonts.transform import (
+    CausalMeanValueImputation,
+)
 from uni2ts.transform import (
     AddObservedMask,
     AddTimeIndex,
@@ -440,7 +443,7 @@ class MoiraicPretrain(L.LightningModule):
                 + ImputeTimeSeries(
                     fields=("target",),
                     optional_fields=("past_feat_dynamic_real",),
-                    imputation_method=DummyValueImputation(value=0.0),
+                    imputation_method=CausalMeanValueImputation(),
                 )
                 + Patchify(
                     max_patch_size=self.module.patch_size,
