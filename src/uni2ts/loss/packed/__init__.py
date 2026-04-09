@@ -25,7 +25,7 @@ from .normalized import (
 )
 from .percentage_error import PackedMAPELoss, PackedSMAPELoss
 from .point import PackedMAELoss, PackedMSELoss, PackedRMSELoss
-from .quantile import PackedQuantileMAELoss, PackedQuantileLoss
+from .quantile import PackedQuantileMAELoss, PackedQuantileLoss, PackedQuantileDecoderMAELoss
 
 __all__ = [
     "PackedDistributionLoss",
@@ -44,5 +44,6 @@ __all__ = [
     "PackedSMAPELoss",
     "PointNormType",
     "PackedQuantileMAELoss",
+    "PackedQuantileDecoderMAELoss",
     "PackedQuantileLoss",
 ]

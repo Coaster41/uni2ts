@@ -165,3 +165,6 @@ example/moirai_forecast.py
 example/moirai_test.sh
 example/moirai_test.txt
 example/ts_long.csv
+datasets/
+slurm/
+outputs/

@@ -21,7 +21,53 @@ import numpy as np
 from jaxtyping import Bool, Float
 
 from ._base import Transformation
-from ._mixin import CheckArrNDimMixin, CollectFuncMixin, MapFuncMixin
+from ._mixin import CheckArrNDimMixin, CollectFuncMixin, MapFuncMixin, ApplyFuncMixin
+from uni2ts.common.typing import UnivarTimeSeries
+from einops import rearrange
+
+@dataclass
+class ContextPatchMasking(ApplyFuncMixin, Transformation):
+    fields: tuple[str, ...]
+    optional_fields: tuple[str, ...] = tuple()
+    prediction_mask_field: str = "prediction_mask"
+    observed_mask_field: str = "observed_mask"
+    mask_ratio: float = 0.0
+
+    def __call__(self, data_entry: dict[str, Any]) -> dict[str, Any]:
+        self.apply_func(
+            self._add_context_patch_mask,
+            data_entry,
+            self.fields,
+            optional_fields=self.optional_fields,
+        )
+        return data_entry
+    
+    # Does not generate the same mask if there are multiple fields
+    def _add_context_patch_mask(self, data_entry: dict[str, Any], field: str) -> np.ndarray:
+        arr: Float[np.ndarray, "var time"] = data_entry[field]
+        patch_size: int = data_entry["patch_size"]
+        prediction_mask: Bool[np.ndarray, "var time"] = data_entry[
+            self.prediction_mask_field
+        ]
+        observed_mask: Bool[np.ndarray, "var time"] = data_entry[
+            self.observed_mask_field
+        ][field]
+        context_length = (~prediction_mask[0]).sum()  # same across all variates
+        num_context_patches = context_length // patch_size
+
+        if num_context_patches > 0 and self.mask_ratio > 0:
+            num_mask = round(num_context_patches * self.mask_ratio)
+            mask_indices = np.random.choice(
+                num_context_patches, size=num_mask, replace=False
+            )
+
+            # Assume context is left aligned (skip next line)
+            # context_start = context_length % patch_size
+            for idx in mask_indices:
+                patch_start = idx * patch_size
+                patch_end = patch_start + patch_size
+                arr[:, patch_start:patch_end] = np.nan
+                observed_mask[:, patch_start:patch_end] = False
 
 
 @dataclass

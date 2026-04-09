@@ -15,8 +15,10 @@
 
 from .forecast import MoiraicForecast
 from .module import MoiraicModule
+from .pretrain import MoiraicPretrain
 
 __all__ = [
     "MoiraicForecast",
     "MoiraicModule",
+    "MoiraicPretrain",
 ]

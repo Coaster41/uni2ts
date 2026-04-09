@@ -151,7 +151,12 @@ def main(cfg: DictConfig):
         if "val_data" in cfg
         else None
     )
-    L.seed_everything(cfg.seed + trainer.logger.version, workers=True)
+    # L.seed_everything(cfg.seed + trainer.logger.version, workers=True)
+    logger_version = trainer.logger.version
+    if isinstance(logger_version, str):
+        # Hash the string version to get a deterministic int
+        logger_version = hash(logger_version) % 10000
+    L.seed_everything(cfg.seed + logger_version, workers=True)
 
     # Print the training info during fine-tuning
     if "collate_fn" not in cfg.train_dataloader:

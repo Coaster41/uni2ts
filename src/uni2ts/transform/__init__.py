@@ -35,7 +35,7 @@ from .reshape import (
     SequencifyField,
     Transpose,
 )
-from .task import EvalMaskedPrediction, ExtendMask, MaskedPrediction
+from .task import EvalMaskedPrediction, ExtendMask, MaskedPrediction, ContextPatchMasking
 
 __all__ = [
     "AddObservedMask",
@@ -58,6 +58,7 @@ __all__ = [
     "LambdaSetFieldIfNotPresent",
     "LastValueImputation",
     "MaskedPrediction",
+    "ContextPatchMasking",
     "PackCollection",
     "PackFields",
     "Pad",

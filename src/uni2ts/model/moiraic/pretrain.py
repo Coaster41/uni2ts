@@ -30,6 +30,7 @@ from uni2ts.loss.packed import (
     PackedNLLLoss,
     PackedPointLoss,
     PackedQuantileMAELoss,
+    PackedQuantileDecoderMAELoss,
     PackedQuantileLoss,
 )
 
@@ -58,6 +59,7 @@ from uni2ts.transform import (
     GetPatchSize,
     ImputeTimeSeries,
     MaskedPrediction,
+    ContextPatchMasking,
     PackFields,
     PatchCrop,
     Patchify,
@@ -77,7 +79,6 @@ class MoiraicPretrain(L.LightningModule):
         "time_id",
         "variate_id",
         "prediction_mask",
-        "patch_size",
     )
     pad_func_map: dict[str, Callable[[Sequence[int], np.dtype], np.ndarray]] = {
         "target": np.zeros,
@@ -85,7 +86,6 @@ class MoiraicPretrain(L.LightningModule):
         "time_id": np.zeros,
         "variate_id": np.zeros,
         "prediction_mask": np.zeros,
-        "patch_size": np.zeros,
     }
 
     def __init__(
@@ -98,10 +98,11 @@ class MoiraicPretrain(L.LightningModule):
         num_warmup_steps: int,
         module_kwargs: Optional[dict[str, Any]] = None,
         module: Optional[MoiraicModule] = None,
+        patch_mask_ratio: float = 0.0,
         num_samples: int = 100,
         beta1: float = 0.9,
         beta2: float = 0.98,
-        loss_func: PackedQuantileLoss = PackedQuantileMAELoss(),
+        loss_func: PackedQuantileLoss = PackedQuantileDecoderMAELoss(),
         val_metric: Optional[PackedLoss | list[PackedLoss]] = None,
         lr: float = 1e-3,
         weight_decay: float = 1e-2,
@@ -125,7 +126,6 @@ class MoiraicPretrain(L.LightningModule):
         time_id: Int[torch.Tensor, "*batch seq_len"],
         variate_id: Int[torch.Tensor, "*batch seq_len"],
         prediction_mask: Bool[torch.Tensor, "*batch seq_len"],
-        patch_size: Int[torch.Tensor, "*batch seq_len"],
         training_mode: Bool = True,
     ) -> tuple[Float[torch.Tensor, "*batch (predict_token num_quantiles patch_size)"], 
                Float[torch.Tensor, "*batch seq_len patch"]]:
@@ -149,7 +149,6 @@ class MoiraicPretrain(L.LightningModule):
             time_id=time_id,
             variate_id=variate_id,
             prediction_mask=prediction_mask,
-            patch_size=patch_size,
             training_mode=training_mode,
         )
         return preds, scaled_target
@@ -385,6 +384,7 @@ class MoiraicPretrain(L.LightningModule):
         GetPatchSize: Get patch size for a given time series
         PatchCrop: Perform cropping on the time series
         PackFields: Pack each feature columns, including 'target' and 'past_feat_dynamic_real'.
+        ContextPatchMasking: Randomly mask (impute nans) entire patches within context proportional to patch mask ratio
         AddObservedMask: Add the observed_mask feature
         ImputeTimeSeries: Imputes missing values with 0
         Patchify: Perform patching
@@ -475,6 +475,11 @@ class MoiraicPretrain(L.LightningModule):
                     prediction_mask_field="prediction_mask",
                     expected_ndim=3,
                 )
+                + ContextPatchMasking(
+                    fields=("target",),
+                    optional_fields=("past_feat_dynamic_real",),
+                    mask_ratio=self.hparams.patch_mask_ratio
+                )
                 + ExtendMask(
                     fields=tuple(),
                     optional_fields=("past_feat_dynamic_real",),
@@ -503,7 +508,7 @@ class MoiraicPretrain(L.LightningModule):
                     optional_fields=("past_feat_dynamic_real",),
                     feat=True,
                 )
-                + SequencifyField(field="patch_size", target_field="target")
+                # + SequencifyField(field="patch_size", target_field="target")
                 + SelectFields(fields=list(self.seq_fields))
             )
 
