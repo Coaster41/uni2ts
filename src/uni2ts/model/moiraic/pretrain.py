@@ -67,6 +67,7 @@ from uni2ts.transform import (
     SelectFields,
     SequencifyField,
     Transformation,
+    CausalMeanImputation,
 )
 
 from .module import MoiraicModule
@@ -195,6 +196,53 @@ class MoiraicPretrain(L.LightningModule):
         )
         return loss
 
+
+    def _extract_next_step_forecast(
+        self,
+        preds: Float[torch.Tensor, "*batch seq_len num_predict_token*num_quantiles*patch_size"],
+        scaled_target: Float[torch.Tensor, "*batch seq_len patch_size"],
+        prediction_mask: Bool[torch.Tensor, "*batch seq_len"],
+        observed_mask: Bool[torch.Tensor, "*batch seq_len patch_size"],
+        sample_id: Int[torch.Tensor, "*batch seq_len"],
+        variate_id: Int[torch.Tensor, "*batch seq_len"],
+    ) -> dict[str, torch.Tensor]:
+        """Extract next-step median forecast aligned with target.
+        
+        Position t's prediction → target at position t+1.
+        Truncate all tensors to (seq_len - 1) for alignment.
+        """
+        num_predict_token = self.module.num_predict_token
+        num_quantiles = self.module.num_quantiles
+        patch_size = self.module.patch_size
+
+        # Separate out predict_token, quantile, and patch dimensions
+        pred = rearrange(
+            preds,
+            "... seq_len (predict_token num_quantiles patch_size) "
+            "-> ... seq_len predict_token num_quantiles patch_size",
+            predict_token=num_predict_token,
+            num_quantiles=num_quantiles,
+            patch_size=patch_size,
+        )
+        # Take first prediction token (next-step), median quantile
+        median_idx = num_quantiles // 2  # index 4 → quantile 0.5
+        pred = pred[..., :-1, 0, median_idx, :]
+        # (*batch, seq_len-1, patch_size)
+
+        # Align target: position t's prediction targets position t+1
+        target_aligned = scaled_target[..., 1:, :]
+        # (*batch, seq_len-1, patch_size)
+
+        # Shift all masks to match target positions
+        return {
+            "pred": pred,
+            "target": target_aligned,
+            "prediction_mask": prediction_mask[..., 1:],
+            "observed_mask": observed_mask[..., 1:, :],
+            "sample_id": sample_id[..., 1:],
+            "variate_id": variate_id[..., 1:],
+        }
+
     def validation_step(
         self, batch: dict[str, torch.Tensor], batch_idx: int, dataloader_idx: int = 0
     ) -> torch.Tensor:
@@ -206,16 +254,17 @@ class MoiraicPretrain(L.LightningModule):
         :param dataloader_idx:
         :return: validation loss for current batch
         """
-        preds = self(
-            training_mode=False,
+        preds, scaled_target = self(
+            training_mode=True,
             **{field: batch[field] for field in list(self.seq_fields) + ["sample_id"]}
         )
+        
         val_loss = self.hparams.loss_func(
             pred=preds,
+            target=scaled_target,
             **{
                 field: batch[field]
                 for field in [
-                    "target",
                     "prediction_mask",
                     "observed_mask",
                     "sample_id",
@@ -223,9 +272,11 @@ class MoiraicPretrain(L.LightningModule):
                 ]
             },
         )
+
         batch_size = (
             batch["sample_id"].max(dim=1).values.sum() if "sample_id" in batch else None
         )
+
         self.log(
             f"val/{self.hparams.loss_func.__class__.__name__}",
             val_loss,
@@ -238,45 +289,23 @@ class MoiraicPretrain(L.LightningModule):
             rank_zero_only=True,
         )
 
+        # Interpretable metrics using aligned next-step forecasts
         if self.hparams.val_metric is not None:
+            aligned = self._extract_next_step_forecast(
+                preds, scaled_target,
+                batch["prediction_mask"],
+                batch["observed_mask"],
+                batch["sample_id"],
+                batch["variate_id"],
+            )
+
             val_metrics = (
                 self.hparams.val_metric
                 if isinstance(self.hparams.val_metric, list)
                 else [self.hparams.val_metric]
             )
             for metric_func in val_metrics:
-                if isinstance(metric_func, PackedPointLoss):
-                    pred = preds.sample(torch.Size((self.hparams.num_samples,)))
-                    pred = torch.median(pred, dim=0).values
-                elif isinstance(metric_func, PackedDistributionLoss):
-                    pred = preds
-                elif isinstance(metric_func, PackedQuantileLoss):
-                    pred = rearrange(
-                        pred,
-                        "... (predict_token num_quantiles patch_size) -> ... (predict_token patch_size) num_quantiles",
-                        predict_token=self.module.num_predict_token,
-                        num_quantiles=self.module.num_quantiles,
-                        patch_size=self.module.patch_size,
-                    )
-                    pred = torch.median(preds, dim=-1).values
-                    # pred = pred[..., pred.shape[-1] // 2]
-                else:
-                    raise ValueError(f"Unsupported loss function: {metric_func}")
-
-                metric = metric_func(
-                    pred=pred,
-                    **{
-                        field: batch[field]
-                        for field in [
-                            "target",
-                            "prediction_mask",
-                            "observed_mask",
-                            "sample_id",
-                            "variate_id",
-                        ]
-                    },
-                )
-
+                metric = metric_func(**aligned)
                 self.log(
                     f"val/{metric_func.__class__.__name__}",
                     metric,
@@ -443,7 +472,7 @@ class MoiraicPretrain(L.LightningModule):
                 + ImputeTimeSeries(
                     fields=("target",),
                     optional_fields=("past_feat_dynamic_real",),
-                    imputation_method=CausalMeanValueImputation(),
+                    imputation_method=CausalMeanImputation(),
                 )
                 + Patchify(
                     max_patch_size=self.module.patch_size,
@@ -475,7 +504,7 @@ class MoiraicPretrain(L.LightningModule):
                     prediction_mask_field="prediction_mask",
                     expected_ndim=3,
                 )
-                + ContextPatchMasking(
+                + ContextPatchMasking( # this comes after impute so it breaks things
                     fields=("target",),
                     optional_fields=("past_feat_dynamic_real",),
                     mask_ratio=self.hparams.patch_mask_ratio
@@ -513,3 +542,8 @@ class MoiraicPretrain(L.LightningModule):
             )
 
         return defaultdict(lambda: default_train_transform)
+
+    
+    @property
+    def val_transform_map(self) -> dict[str, Callable[..., Transformation]]:
+        return self.train_transform_map

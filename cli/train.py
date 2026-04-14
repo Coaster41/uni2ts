@@ -122,9 +122,10 @@ class DataModule(L.LightningDataModule):
 @hydra.main(version_base="1.3", config_name="default.yaml")
 def main(cfg: DictConfig):
     if cfg.tf32:
-        assert cfg.trainer.precision == 32
+        assert cfg.trainer.precision in [32, "bf16-mixed"]
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
+        torch.set_float32_matmul_precision("high")
 
     model: L.LightningModule = instantiate(cfg.model, _convert_="all")
 

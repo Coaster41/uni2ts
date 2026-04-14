@@ -17,7 +17,7 @@ from ._base import Chain, Identity, Transformation
 from .crop import EvalCrop, FinetunePatchCrop, PatchCrop
 from .feature import AddObservedMask, AddSampleIndex, AddTimeIndex, AddVariateIndex
 from .field import LambdaSetFieldIfNotPresent, RemoveFields, SelectFields, SetValue
-from .imputation import DummyValueImputation, ImputeTimeSeries, LastValueImputation
+from .imputation import DummyValueImputation, ImputeTimeSeries, LastValueImputation, CausalMeanImputation
 from .pad import EvalPad, Pad, PadFreq
 from .patch import (
     DefaultPatchSizeConstraints,
@@ -74,4 +74,5 @@ __all__ = [
     "Transformation",
     "Transpose",
     "FinetunePatchCrop",
+    "CausalMeanImputation"
 ]

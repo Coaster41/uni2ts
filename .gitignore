@@ -168,3 +168,4 @@ example/ts_long.csv
 datasets/
 slurm/
 outputs/
+diagnostics/

@@ -24,6 +24,7 @@ from .lib_city import LibCityDatasetBuilder
 from .others import OthersLOTSADatasetBuilder
 from .proenfo import ProEnFoDatasetBuilder
 from .subseasonal import SubseasonalDatasetBuilder
+from uni2ts.data.builder.lotsa_v1.chronos_synth import ChronosSyntheticDatasetBuilder
 
 __all__ = [
     "LOTSADatasetBuilder",
@@ -38,4 +39,5 @@ __all__ = [
     "OthersLOTSADatasetBuilder",
     "ProEnFoDatasetBuilder",
     "SubseasonalDatasetBuilder",
+    "ChronosSyntheticDatasetBuilder"
 ]
