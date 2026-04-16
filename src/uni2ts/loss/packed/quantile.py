@@ -59,6 +59,7 @@ class PackedQuantileMAELoss(PackedQuantileLoss):
 
 class PackedQuantileDecoderMAELoss(PackedQuantileLoss):
     error_func = torch.nn.L1Loss(reduction="none")
+    clamp_loss = 100
 
     def _loss_func(
         self,
@@ -86,13 +87,13 @@ class PackedQuantileDecoderMAELoss(PackedQuantileLoss):
         # *batch (seq_len-num_pred_tok) num_quantiles (num_pred_tok patch_size)
 
         targets = target.unfold(-2, num_predict_token, 1)
-        # "*batch (seq_len-num_pred_tok+1) num_pred_tok patch_size"    
+        # "*batch (seq_len-num_pred_tok+1) patch_size num_pred_tok"    
         # print(f"targets.shape: {targets.shape}")
         targets = targets[..., 1:, :, :] 
-        # "*batch (seq_len-num_pred_tok) num_pred_tok patch_size"        
+        # "*batch (seq_len-num_pred_tok) patch_size num_pred_tok"        
         targets = repeat(
             targets,
-            "... predict_token patch_size -> ... num_quantiles (predict_token patch_size)",
+            "... patch_size predict_token -> ... num_quantiles (predict_token patch_size)",
             num_quantiles=num_quantiles,
         )
         # *batch (seq_len-num_pred_tok-1) num_quantiles (num_pred_tok patch_size) 
@@ -124,6 +125,9 @@ class PackedQuantileDecoderMAELoss(PackedQuantileLoss):
         mask = prediction_mask.unsqueeze(-1) * observed_mask
         # ASSUMING UNIVARIATE WITH NO COVARIATES
         mask = mask.unfold(-2, num_predict_token, 1)[..., 1:, :, :] 
-        mask = rearrange(mask, "... num_pred_token patch_size -> ... (num_pred_token patch_size)")
+        mask = rearrange(mask, "... patch_size num_pred_token -> ... (num_pred_token patch_size)")
         # "*batch (seq_len-num_pred_tok) num_pred_tok patch_size"    
-        return (loss * mask).sum()
+        loss = loss.clamp(max=self.clamp_loss) # tune this value
+        masked_loss = (loss * mask).sum()
+        num_active = mask.sum().clamp(min=1)         # avoid division by zero
+        return masked_loss / num_active

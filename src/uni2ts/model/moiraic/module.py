@@ -54,6 +54,7 @@ class MoiraicModule(
         scaling: bool = True,
         num_predict_token: int = 1,
         quantile_levels: tuple[float] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
+        min_scale: float = 1e-5,
     ):
         """
         :param d_model: model hidden dimensions
@@ -64,6 +65,7 @@ class MoiraicModule(
         :param dropout_p: dropout probability for all other layers
         :param scaling: whether to apply scaling (standardization)
         :param num_quantiles: number of quantile levels
+        :param min_scale: minimum scale for std scaler
         """
         super().__init__()
         self.d_model = d_model
@@ -75,7 +77,7 @@ class MoiraicModule(
         self.quantile_levels = quantile_levels
         self.num_quantiles = len(quantile_levels)
 
-        self.scaler = PackedStdScaler() if scaling else PackedNOPScaler()
+        self.scaler = PackedStdScaler(minimum_scale=min_scale) if scaling else PackedNOPScaler()
         self.in_proj = ResidualBlock(
             input_dims=patch_size * 2,
             hidden_dims=d_model,

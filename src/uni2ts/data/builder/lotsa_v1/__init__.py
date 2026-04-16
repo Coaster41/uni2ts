@@ -24,6 +24,9 @@ from .lib_city import LibCityDatasetBuilder
 from .others import OthersLOTSADatasetBuilder
 from .proenfo import ProEnFoDatasetBuilder
 from .subseasonal import SubseasonalDatasetBuilder
+from .gluonts_sub import GluonTSSubDatasetBuilder
+from .gluonts_elec import GluonTSElecDatasetBuilder
+from .gluonts_wiki import GluonTSWikiDatasetBuilder
 from uni2ts.data.builder.lotsa_v1.chronos_synth import ChronosSyntheticDatasetBuilder
 
 __all__ = [
@@ -39,5 +42,8 @@ __all__ = [
     "OthersLOTSADatasetBuilder",
     "ProEnFoDatasetBuilder",
     "SubseasonalDatasetBuilder",
-    "ChronosSyntheticDatasetBuilder"
+    "ChronosSyntheticDatasetBuilder",
+    "GluonTSSubDatasetBuilder",
+    "GluonTSElecDatasetBuilder"
+    "GluonTSWikiDatasetBuilder"
 ]

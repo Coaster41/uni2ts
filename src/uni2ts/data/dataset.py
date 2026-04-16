@@ -47,6 +47,8 @@ class SampleTimeSeriesType(Enum):
 
 
 class TimeSeriesDataset(Dataset):
+    _MAX_RETRIES = 20
+
     def __init__(
         self,
         indexer: Indexer[dict[str, Any]],
@@ -80,15 +82,40 @@ class TimeSeriesDataset(Dataset):
         :param idx: index of time series to retrieve. if sample_time_series is specified, this will be ignored.
         :return: transformed time series data
         """
-        if idx < 0 or idx >= len(self):
-            raise IndexError(
-                f"Index {idx} out of range for dataset of length {len(self)}"
-            )
+        for attempt in range(self._MAX_RETRIES):
+            try:
+                if idx < 0 or idx >= len(self):
+                    raise IndexError(
+                        f"Index {idx} out of range for dataset of length {len(self)}"
+                    )
+                
+                if self.sample_time_series != SampleTimeSeriesType.NONE:
+                    idx = np.random.choice(len(self.probabilities), p=self.probabilities)
+                    
+                actual_idx = idx if attempt == 0 else int(
+                    np.random.randint(self.__len__())
+                )
+                return self.transform(
+                    self._flatten_data(self._get_data(actual_idx))
+                )
+            except (ValueError, IndexError, RuntimeError) as e:
+                if attempt == self._MAX_RETRIES - 1:
+                    raise RuntimeError(
+                        f"Failed after {self._MAX_RETRIES} retries. "
+                        f"Last error: {e}"
+                    ) from e
+                # Optionally log for debugging:
+                print(f"[retry {attempt+1}] idx={actual_idx}: {e}")
 
-        if self.sample_time_series != SampleTimeSeriesType.NONE:
-            idx = np.random.choice(len(self.probabilities), p=self.probabilities)
+        # if idx < 0 or idx >= len(self):
+        #     raise IndexError(
+        #         f"Index {idx} out of range for dataset of length {len(self)}"
+        #     )
 
-        return self.transform(self._flatten_data(self._get_data(idx)))
+        # if self.sample_time_series != SampleTimeSeriesType.NONE:
+        #     idx = np.random.choice(len(self.probabilities), p=self.probabilities)
+
+        # return self.transform(self._flatten_data(self._get_data(idx)))
 
     @property
     def num_ts(self) -> int:
