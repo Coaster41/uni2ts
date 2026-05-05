@@ -35,6 +35,7 @@ class Env:
         "CUSTOM_DATA_PATH",
         "HF_CACHE_PATH",
         "GIFT_EVAL_PRETRAIN_PATH",
+        "GIFT_EVAL_TEST_PATH"
     ]
 
     def __new__(cls):

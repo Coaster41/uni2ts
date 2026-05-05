@@ -47,7 +47,7 @@ class SampleTimeSeriesType(Enum):
 
 
 class TimeSeriesDataset(Dataset):
-    _MAX_RETRIES = 20
+    _MAX_RETRIES = 50
 
     def __init__(
         self,
@@ -84,17 +84,19 @@ class TimeSeriesDataset(Dataset):
         """
         for attempt in range(self._MAX_RETRIES):
             try:
+                    
+                actual_idx = idx if attempt == 0 else int(
+                    np.random.randint(self.__len__())
+                )
+                
                 if idx < 0 or idx >= len(self):
                     raise IndexError(
                         f"Index {idx} out of range for dataset of length {len(self)}"
                     )
                 
                 if self.sample_time_series != SampleTimeSeriesType.NONE:
-                    idx = np.random.choice(len(self.probabilities), p=self.probabilities)
-                    
-                actual_idx = idx if attempt == 0 else int(
-                    np.random.randint(self.__len__())
-                )
+                    actual_idx = np.random.choice(len(self.probabilities), p=self.probabilities)
+
                 return self.transform(
                     self._flatten_data(self._get_data(actual_idx))
                 )
@@ -105,7 +107,7 @@ class TimeSeriesDataset(Dataset):
                         f"Last error: {e}"
                     ) from e
                 # Optionally log for debugging:
-                print(f"[retry {attempt+1}] idx={actual_idx}: {e}")
+                # print(f"[retry {attempt+1}] idx={actual_idx}: {e}")
 
         # if idx < 0 or idx >= len(self):
         #     raise IndexError(

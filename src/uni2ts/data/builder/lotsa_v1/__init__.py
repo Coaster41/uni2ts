@@ -27,7 +27,8 @@ from .subseasonal import SubseasonalDatasetBuilder
 from .gluonts_sub import GluonTSSubDatasetBuilder
 from .gluonts_elec import GluonTSElecDatasetBuilder
 from .gluonts_wiki import GluonTSWikiDatasetBuilder
-from uni2ts.data.builder.lotsa_v1.chronos_synth import ChronosSyntheticDatasetBuilder
+from .chronos_synth import ChronosSyntheticDatasetBuilder
+from .gift_eval_test import GiftEvalTestDatasetBuilder
 
 __all__ = [
     "LOTSADatasetBuilder",
@@ -46,4 +47,5 @@ __all__ = [
     "GluonTSSubDatasetBuilder",
     "GluonTSElecDatasetBuilder"
     "GluonTSWikiDatasetBuilder"
+    "GiftEvalTestDatasetBuilder"
 ]

@@ -1,4 +1,4 @@
-_target_: uni2ts.model.moiraic.MoiraicPretrain
+_target_: uni2ts.model.moiraie.MoiraiePretrain
 module_kwargs:
   _target_: builtins.dict
   d_model: 512
@@ -8,23 +8,23 @@ module_kwargs:
   quantile_levels: ${as_tuple:[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]}
   max_seq_len: 512
   attn_dropout_p: 0.0  
-  num_predict_token: 4
+  num_predict_token: 1
   dropout_p: 0.0
   scaling: true
   min_scale: 0.1
 min_patches: 2
-min_mask_ratio: 0.6
-max_mask_ratio: 0.75
+min_mask_ratio: 0.15
+max_mask_ratio: 0.5
 patch_mask_ratio: 0
 max_dim: 128
 loss_func:
-  _target_: uni2ts.loss.packed.PackedQuantileDecoderMAELoss
+  _target_: uni2ts.loss.packed.PackedQuantileEncoderMAELoss
 val_metric:
   _target_: uni2ts.loss.packed.PackedNMAELoss
-lr: 1.5e-4
+lr: 1e-3
 weight_decay: 5e-2
 beta1: 0.9
-beta2: 0.95
+beta2: 0.98
 num_training_steps: ${mul:${trainer.max_epochs},${train_dataloader.num_batches_per_epoch}}
-num_warmup_steps: 5_000
+num_warmup_steps: 10_000
 log_on_step: true

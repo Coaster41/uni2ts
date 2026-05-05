@@ -69,7 +69,7 @@ train_dataloader:
   batch_size: 256
   batch_size_factor: 2.0
   cycle: true
-  num_batches_per_epoch: 2000
+  num_batches_per_epoch: 1000
   shuffle: true
   num_workers: 4
   collate_fn:

@@ -1,0 +1,8 @@
+_target_: uni2ts.data.builder.ConcatDatasetBuilder
+_args_:
+  - _target_: uni2ts.data.builder.lotsa_v1.GiftEvalTestDatasetBuilder
+    datasets: ${cls_getattr:${._target_},dataset_list}
+    weight_map: ${cls_getattr:${._target_},default_weight_map}
+    sample_time_series:
+      _target_: uni2ts.data.dataset.SampleTimeSeriesType
+      _args_: ["none"]
