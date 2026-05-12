@@ -59,7 +59,7 @@ class PackedQuantileMAELoss(PackedQuantileLoss):
 
 class PackedQuantileDecoderMAELoss(PackedQuantileLoss):
     error_func = torch.nn.L1Loss(reduction="none")
-    clamp_loss = 100
+    clamp_loss = 3
 
     def _loss_func(
         self,
@@ -110,6 +110,7 @@ class PackedQuantileDecoderMAELoss(PackedQuantileLoss):
         )
 
         # aggregated by num_quantile axis
+        quantile_loss = quantile_loss.clamp(max=self.clamp_loss) # tune this value
         return quantile_loss.mean(dim=-2)
 
     def reduce_loss(
@@ -135,7 +136,7 @@ class PackedQuantileDecoderMAELoss(PackedQuantileLoss):
 
 class PackedQuantileEncoderMAELoss(PackedQuantileLoss):
     error_func = torch.nn.L1Loss(reduction="none")
-    clamp_loss = 100
+    clamp_loss = 3
 
     def _loss_func(
         self,
@@ -182,6 +183,7 @@ class PackedQuantileEncoderMAELoss(PackedQuantileLoss):
         )
 
         # aggregated by num_quantile axis
+        quantile_loss = quantile_loss.clamp(max=self.clamp_loss) # tune this value
         return quantile_loss.mean(dim=-2)
 
     def reduce_loss(
@@ -199,7 +201,6 @@ class PackedQuantileEncoderMAELoss(PackedQuantileLoss):
         mask = mask.unfold(-2, num_predict_token, 1)
         mask = rearrange(mask, "... patch_size num_pred_token -> ... (num_pred_token patch_size)")
         # "*batch (seq_len-num_pred_tok) num_pred_tok patch_size"    
-        loss = loss.clamp(max=self.clamp_loss) # tune this value
         masked_loss = (loss * mask).sum()
         num_active = mask.sum().clamp(min=1)         # avoid division by zero
         return masked_loss / num_active

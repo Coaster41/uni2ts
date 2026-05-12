@@ -23,6 +23,7 @@ from hydra.utils import instantiate
 from omegaconf import DictConfig
 from torch.utils._pytree import tree_map
 from torch.utils.data import Dataset, DistributedSampler
+import os
 
 from uni2ts.common import hydra_util  # noqa: hydra resolvers
 from uni2ts.data.loader import DataLoader
@@ -121,6 +122,14 @@ class DataModule(L.LightningDataModule):
 
 @hydra.main(version_base="1.3", config_name="default.yaml")
 def main(cfg: DictConfig):
+    # --- Capture Hydra runtime info early, before Lightning spawns DDP workers ---
+    from hydra.core.hydra_config import HydraConfig
+    try:
+        output_dir = HydraConfig.get().runtime.output_dir
+    except ValueError:
+        # Fallback when the script is re-entered by a DDP subprocess
+        output_dir = os.getcwd()
+
     if cfg.tf32:
         assert cfg.trainer.precision in [32, "bf16-mixed"]
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -194,8 +203,18 @@ def main(cfg: DictConfig):
         ckpt_path=cfg.ckpt_path,
     )
 
-    print("Finished training!")
+    metric_name = "val/PackedQuantileEncoderMAELoss_epoch"
+    best_val = trainer.callback_metrics.get(metric_name)
+    if trainer.is_global_zero and best_val is not None:
+        metric_path = os.path.join(
+            hydra.core.hydra_config.HydraConfig.get().runtime.output_dir,
+            "best_val_metric.txt",
+        )
+        with open(metric_path, "w") as f:
+            f.write(str(float(best_val)))
 
+    # Optuna objective
+    return float(best_val) if best_val is not None else float("inf")
 
 if __name__ == "__main__":
     main()

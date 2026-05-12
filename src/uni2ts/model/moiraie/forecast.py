@@ -250,13 +250,13 @@ class MoiraieForecast(L.LightningModule):
         pred_index = torch.arange(
             start=total_context_token,
             end=total_context_token + total_predict_token,
-            step=per_var_predict_token,
+            step=per_var_predict_token, # this should always be 1
         )
-        assign_index = torch.arange(
-            start=total_context_token,
-            end=total_context_token + total_predict_token,
-            step=per_var_predict_token,
-        )
+        # assign_index = torch.arange(
+        #     start=total_context_token,
+        #     end=total_context_token + total_predict_token,
+        #     step=per_var_predict_token,
+        # )
         quantile_prediction = repeat(
             target,
             "... patch_size -> ... num_quantiles patch_size",
@@ -274,6 +274,26 @@ class MoiraieForecast(L.LightningModule):
             training_mode=False,
         )
 
+        # Each prediction token reconstructs itself (and optionally the next num_predict_token-1 patches)
+        preds_at_pred = rearrange(
+            preds[..., pred_index, :],
+            "... seq (predict_token num_quantiles patch_size) -> ... (seq predict_token) num_quantiles patch_size",
+            predict_token=self.module.num_predict_token,
+            num_quantiles=self.module.num_quantiles,
+            patch_size=self.module.patch_size,
+        )
+
+        # With num_predict_token=1, this is a direct 1:1 assignment
+        quantile_prediction[..., pred_index, :, :] = preds_at_pred
+
+        return self._format_preds(
+            self.module.num_quantiles,
+            self.module.patch_size,
+            quantile_prediction,
+            self.hparams.target_dim,
+        )
+
+        '''
         def structure_multi_predict(
             per_var_predict_token,
             pred_index,
@@ -433,6 +453,7 @@ class MoiraieForecast(L.LightningModule):
                 quantile_prediction,
                 self.hparams.target_dim,
             )
+'''
 
     def predict(
         self,
@@ -445,8 +466,6 @@ class MoiraieForecast(L.LightningModule):
         ] = None,
     ) -> Float[numpy.ndarray, "batch num_quantiles future_time *tgt"]:
 
-        # only support univariate forecast now
-        # implementation refer to https://github.com/awslabs/gluonts/blob/v0.15.x/src/gluonts/transform/split.py#L523
         data_entry = {
             "past_target": past_target,
             "feat_dynamic_real": feat_dynamic_real,
@@ -468,7 +487,7 @@ class MoiraieForecast(L.LightningModule):
         else:
             data_entry["past_observed_feat_dynamic_real"] = None
 
-        # check and use the same imputation strategy as pretraining
+        # Imputation
         impute = CausalMeanImputation()
 
         def process_sample(sample):
@@ -483,35 +502,65 @@ class MoiraieForecast(L.LightningModule):
             if value is not None:
                 data_entry[key] = [process_sample(sample) for sample in value]
 
+        batch_size = len(data_entry["past_target"])
+        target_dim = data_entry["past_target"][0].shape[-1]
+
         data_entry["past_is_pad"] = np.zeros(
-            (len(data_entry["past_target"]), self.hparams.context_length), dtype=bool
+            (batch_size, self.hparams.context_length), dtype=bool
         )
 
-        # pad or slice context data
-        for key in data_entry:
-            if data_entry[key] is not None and isinstance(data_entry[key], list):
+        # Determine expected lengths
+        context_length = self.hparams.context_length
+        prediction_length = self.hparams.prediction_length
+        full_length = context_length + prediction_length
+
+        context_only_keys = {
+            "past_target", "past_observed_target",
+            "past_feat_dynamic_real", "past_observed_feat_dynamic_real",
+        }
+        full_horizon_keys = {
+            "feat_dynamic_real", "observed_feat_dynamic_real",
+        }
+
+        # Pad or slice context-only fields to context_length
+        for key in context_only_keys:
+            if data_entry.get(key) is not None:
                 for idx in range(len(data_entry[key])):
-                    if data_entry[key][idx].shape[0] > self.hparams.context_length:
-                        data_entry[key][idx] = data_entry[key][idx][
-                            -self.hparams.context_length :, :
-                        ]
+                    if data_entry[key][idx].shape[0] > context_length:
+                        data_entry[key][idx] = data_entry[key][idx][-context_length:, :]
                     else:
-                        pad_length = (
-                            self.hparams.context_length - data_entry[key][idx].shape[0]
-                        )
+                        pad_length = context_length - data_entry[key][idx].shape[0]
                         pad_block = np.full(
-                            (pad_length, 1),
+                            (pad_length, data_entry[key][idx].shape[-1]),
                             data_entry[key][idx][0],
                             dtype=data_entry[key][idx].dtype,
-                        )  # alternative: padding with 0
+                        )
                         data_entry[key][idx] = np.concatenate(
                             [pad_block, data_entry[key][idx]], axis=0
                         )
                         if key == "past_target":
                             data_entry["past_is_pad"][idx, :pad_length] = True
 
+        # Pad or slice full-horizon fields to context_length + prediction_length
+        for key in full_horizon_keys:
+            if data_entry.get(key) is not None:
+                for idx in range(len(data_entry[key])):
+                    if data_entry[key][idx].shape[0] > full_length:
+                        data_entry[key][idx] = data_entry[key][idx][-full_length:, :]
+                    elif data_entry[key][idx].shape[0] < full_length:
+                        pad_length = full_length - data_entry[key][idx].shape[0]
+                        pad_block = np.full(
+                            (pad_length, data_entry[key][idx].shape[-1]),
+                            data_entry[key][idx][0],
+                            dtype=data_entry[key][idx].dtype,
+                        )
+                        data_entry[key][idx] = np.concatenate(
+                            [pad_block, data_entry[key][idx]], axis=0
+                        )
+
+        # Convert to tensors
         for k in ["past_target", "feat_dynamic_real", "past_feat_dynamic_real"]:
-            if data_entry[k] is not None:
+            if data_entry.get(k) is not None:
                 data_entry[k] = torch.tensor(
                     np.array(data_entry[k]), device=self.device, dtype=torch.float32
                 )
@@ -522,14 +571,100 @@ class MoiraieForecast(L.LightningModule):
             "past_observed_feat_dynamic_real",
             "past_is_pad",
         ]:
-            if data_entry[k] is not None:
+            if data_entry.get(k) is not None:
                 data_entry[k] = torch.tensor(
                     np.array(data_entry[k]), device=self.device, dtype=torch.bool
                 )
 
+        # ===== Explicitly create prediction horizon padding =====
+        past_target_t = data_entry["past_target"]
+        past_observed_t = data_entry["past_observed_target"]
+        past_is_pad_t = data_entry["past_is_pad"]
+
+        # Zero-filled future target for the entire prediction horizon
+        future_target = torch.zeros(
+            (batch_size, prediction_length, target_dim),
+            dtype=torch.float32,
+            device=self.device,
+        )
+        # Future is unobserved (will be reconstructed by encoder)
+        future_observed_target = torch.ones(
+            (batch_size, prediction_length, target_dim),
+            dtype=torch.bool,
+            device=self.device,
+        )
+
+        # Convert full sequence into patched token representation
+        (
+            target,
+            observed_mask,
+            sample_id,
+            time_id,
+            variate_id,
+            prediction_mask,
+        ) = self._convert(
+            self.module.patch_size,
+            past_target_t,
+            past_observed_t,
+            past_is_pad_t,
+            future_target=future_target,
+            future_observed_target=future_observed_target,
+            feat_dynamic_real=data_entry.get("feat_dynamic_real"),
+            observed_feat_dynamic_real=data_entry.get("observed_feat_dynamic_real"),
+            past_feat_dynamic_real=data_entry.get("past_feat_dynamic_real"),
+            past_observed_feat_dynamic_real=data_entry.get("past_observed_feat_dynamic_real"),
+        )
+
+        # Single forward pass through the encoder
         with torch.no_grad():
-            predictions = self(**data_entry).detach().cpu().numpy()
-        return predictions
+            preds = self.module(
+                target,
+                observed_mask,
+                sample_id,
+                time_id,
+                variate_id,
+                prediction_mask,
+                training_mode=False,
+            )
+
+        # Extract predictions from all prediction token positions
+        per_var_context_token = self.context_token_length(self.module.patch_size)
+        total_context_token = self.hparams.target_dim * per_var_context_token
+        per_var_predict_token = self.prediction_token_length(self.module.patch_size)
+        total_predict_token = self.hparams.target_dim * per_var_predict_token
+
+        pred_index = torch.arange(
+            start=total_context_token,
+            end=total_context_token + total_predict_token,
+            device=self.device,
+        )
+
+        quantile_prediction = repeat(
+            target,
+            "... patch_size -> ... num_quantiles patch_size",
+            num_quantiles=len(self.module.quantile_levels),
+            patch_size=self.module.patch_size,
+        ).clone()
+
+        preds_at_pred = rearrange(
+            preds[..., pred_index, :],
+            "... seq (predict_token num_quantiles patch_size) -> ... (seq predict_token) num_quantiles patch_size",
+            predict_token=self.module.num_predict_token,
+            num_quantiles=self.module.num_quantiles,
+            patch_size=self.module.patch_size,
+        )
+
+        quantile_prediction[..., pred_index, :, :] = preds_at_pred
+
+        predictions = self._format_preds(
+            self.module.num_quantiles,
+            self.module.patch_size,
+            quantile_prediction,
+            self.hparams.target_dim,
+        )
+
+        return predictions.detach().cpu().numpy()
+        
 
     @staticmethod
     def _patched_seq_pad(

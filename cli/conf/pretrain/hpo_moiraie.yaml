@@ -1,0 +1,72 @@
+defaults:
+  - default
+  - override hydra/launcher: submitit_slurm
+  - override hydra/sweeper: optuna
+  - _self_
+
+run_name: moiraie_hpo
+seed: 0
+
+trainer:
+  accelerator: gpu
+  strategy: auto
+  devices: 1
+  num_nodes: 1
+  max_epochs: 20
+  accumulate_grad_batches: 8
+  enable_progress_bar: false
+  enable_checkpointing: false
+  log_every_n_steps: 50
+  limit_val_batches: 100
+  logger:
+    - _target_: lightning.pytorch.loggers.TensorBoardLogger
+      save_dir: ${hydra:runtime.output_dir}
+      name: logs
+  callbacks:
+    - _target_: lightning.pytorch.callbacks.LearningRateMonitor
+      logging_interval: epoch
+
+train_dataloader:
+  batch_size: 256
+  num_batches_per_epoch: 250
+  num_workers: 4
+  persistent_workers: true
+
+val_dataloader:
+  batch_size: 512
+  num_workers: 4
+  persistent_workers: true
+
+hydra:
+  mode: MULTIRUN
+
+  sweep:
+    dir: outputs/hpo/moiraie/gift_eval_pretrain_weighted/moiraie_hpo
+    subdir: ${hydra.job.num}
+
+  launcher:
+    submitit_folder: ${hydra.sweep.dir}/.submitit/%j
+    timeout_min: 120
+    cpus_per_task: 3
+    gpus_per_node: 1
+    tasks_per_node: 1
+    nodes: 1
+    mem_gb: 32
+    partition: datalab.p
+    additional_parameters:
+      nodelist: markov-2
+
+  sweeper:
+    direction: minimize
+    study_name: moiraie_encoder_hpo
+    n_trials: 32
+    n_jobs: 8
+    sampler:
+      _target_: optuna.samplers.TPESampler
+      seed: 123
+    params:
+      model.lr: tag(log, interval(3e-5, 1e-3))
+      model.weight_decay: tag(log, interval(1e-3, 1e-1))
+      model.beta2: choice(0.95, 0.98, 0.99, 0.999)
+      model.num_warmup_steps: choice(100, 250, 500, 1000)
+      trainer.gradient_clip_val: choice(0.5, 1.0)

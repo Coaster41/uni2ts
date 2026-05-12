@@ -1,0 +1,161 @@
+# @package _global_
+defaults:
+  - _self_
+  - model: ???
+  - data: ???
+  - val_data: null
+  - override hydra/sweeper: optuna
+  - override hydra/sweeper/sampler: tpe
+  - override hydra/launcher: submitit_slurm
+
+# ---- Same base settings as default.yaml ------------------------------------
+run_name: moiraie_hpo
+n_trials: 32
+warmup_ratio: 0.05
+hpo_root: /srv/disk00/ctadler/uni2ts/outputs/hpo
+
+seed: 0
+tf32: true
+compile: false
+ckpt_path: null
+
+trainer:
+  _target_: lightning.Trainer
+  accelerator: auto
+  strategy: auto
+  devices: auto
+  num_nodes: 1
+  precision: bf16-mixed
+  logger:
+    - _target_: lightning.pytorch.loggers.TensorBoardLogger
+      save_dir: ${hydra:runtime.output_dir}
+      name: logs
+    - _target_: lightning.pytorch.loggers.WandbLogger
+      project: "moiraic"
+      name: ${run_name}
+      save_dir: ${hydra:runtime.output_dir}
+      log_model: false
+  callbacks:
+    - _target_: lightning.pytorch.callbacks.LearningRateMonitor
+      logging_interval: epoch
+    - _target_: lightning.pytorch.callbacks.ModelCheckpoint
+      dirpath: ${hydra:runtime.output_dir}/checkpoints
+      filename: last
+      monitor: epoch
+      mode: max
+      save_top_k: 1
+      every_n_epochs: 1
+    - _target_: uni2ts.callbacks.HuggingFaceCheckpoint.HuggingFaceCheckpoint
+      dirpath: ${hydra:runtime.output_dir}/HF_checkpoints
+      filename: last
+      monitor: epoch
+      mode: max
+      save_top_k: 1
+      every_n_epochs: 1
+    - _target_: lightning.pytorch.callbacks.ModelCheckpoint
+      dirpath: ${hydra:runtime.output_dir}/checkpoints
+      filename: best_val
+      monitor: val/PackedQuantileEncoderMAELoss_epoch
+      mode: min
+      save_top_k: 1
+      every_n_epochs: 1
+  max_epochs: 10
+  enable_progress_bar: true
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+  check_val_every_n_epoch: 1
+  log_every_n_steps: 50
+  limit_val_batches: 100
+
+train_dataloader:
+  _target_: uni2ts.data.loader.DataLoader
+  batch_size: 256
+  batch_size_factor: 2.0
+  cycle: true
+  num_batches_per_epoch: 1000
+  shuffle: true
+  num_workers: 4
+  collate_fn:
+    _target_: uni2ts.data.loader.PackCollate
+    max_length: ${model.module_kwargs.max_seq_len}
+    seq_fields: ${cls_getattr:${model._target_},seq_fields}
+    pad_func_map: ${cls_getattr:${model._target_},pad_func_map}
+  pin_memory: true
+  drop_last: true
+  fill_last: false
+  worker_init_fn: null
+  prefetch_factor: 2
+  persistent_workers: true
+
+val_dataloader:
+  _target_: uni2ts.data.loader.DataLoader
+  batch_size: 512
+  batch_size_factor: 2.0
+  cycle: true
+  num_batches_per_epoch: 250
+  shuffle: true
+  num_workers: 4
+  collate_fn:
+    _target_: uni2ts.data.loader.PackCollate
+    max_length: ${model.module_kwargs.max_seq_len}
+    seq_fields: ${cls_getattr:${model._target_},seq_fields}
+    pad_func_map: ${cls_getattr:${model._target_},pad_func_map}
+  pin_memory: true
+  drop_last: true
+  fill_last: false
+  worker_init_fn: null
+  prefetch_factor: 2
+  persistent_workers: true
+
+# Override the per-trial warmup to be ratio-driven
+model:
+  num_warmup_steps: ${to_int:${mul:${warmup_ratio},${mul:${trainer.max_epochs},${train_dataloader.num_batches_per_epoch}}}}
+
+# ---- Hydra multirun / sweeper / launcher -----------------------------------
+hydra:
+  mode: MULTIRUN
+  sweep:
+    dir: ${hpo_root}/${run_name}
+    subdir: trial_${hydra.job.num}
+  run:
+    dir: ${hpo_root}/${run_name}/trial_${hydra.job.num}
+
+  sweeper:
+    _target_: hydra_plugins.hydra_optuna_sweeper.optuna_sweeper.OptunaSweeper
+    direction: minimize
+    study_name: ${run_name}
+    storage: sqlite:////srv/disk00/ctadler/uni2ts/outputs/hpo/${run_name}/optuna.db
+    n_trials: ${n_trials}
+    n_jobs: 1
+    sampler:
+      _target_: optuna.samplers.TPESampler
+      seed: 0
+      multivariate: true
+      n_startup_trials: 8
+    params:
+      model.min_mask_ratio:       interval(0.05, 0.25)
+      model.max_mask_ratio:       interval(0.30, 0.70)
+      model.lr:                   tag(log, interval(1e-5, 5e-3))
+      model.weight_decay:         tag(log, interval(1e-4, 2e-1))
+      model.beta1:                interval(0.80, 0.95)
+      model.beta2:                interval(0.95, 0.999)
+      warmup_ratio:               interval(0.0, 0.20)
+      trainer.gradient_clip_val:  tag(log, interval(0.1, 10.0))
+
+  launcher:
+    _target_: hydra_plugins.hydra_submitit_launcher.submitit_launcher.SlurmLauncher
+    submitit_folder: ${hpo_root}/${run_name}/.submitit/%j
+    timeout_min: 1440
+    nodes: 1
+    tasks_per_node: 8
+    gpus_per_node: 8
+    cpus_per_task: 3
+    mem_gb: 256
+    partition: datalab.p
+    name: ${run_name}
+    stderr_to_stdout: true
+    additional_parameters:
+      nodelist: markov-2
+      gres: "gpu:8"
+      output: /srv/disk00/ctadler/uni2ts/slurm/logs/hpo_${run_name}_%j.txt

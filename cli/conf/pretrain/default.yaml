@@ -54,6 +54,13 @@ trainer:
       dirpath: ${hydra:runtime.output_dir}/HF_checkpoints
       save_top_k: -1
       every_n_epochs: 5
+    - _target_: lightning.pytorch.callbacks.ModelCheckpoint
+      dirpath: ${hydra:runtime.output_dir}/checkpoints
+      filename: best_val
+      monitor: val/PackedQuantileEncoderMAELoss_epoch
+      mode: min
+      save_top_k: 1
+      every_n_epochs: 1
   # epoch-based training provides averaged metrics
   # cannot use max_steps with epoch-based training - resume from checkpoint on wrong epoch
   max_epochs: 100

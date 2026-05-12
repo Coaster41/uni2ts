@@ -19,6 +19,9 @@ from typing import Any
 from hydra.utils import get_class
 from omegaconf import OmegaConf
 
+if not OmegaConf.has_resolver("to_int"):
+    OmegaConf.register_new_resolver("to_int", lambda x: int(float(x)))
+
 
 def register_resolver(name: str) -> Callable[[Callable], Callable]:
     def decorator(resolver: Callable) -> Callable:
