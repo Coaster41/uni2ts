@@ -121,6 +121,7 @@ class MoiraicModule(
         variate_id: Int[torch.Tensor, "*batch seq_len"],
         prediction_mask: Bool[torch.Tensor, "*batch seq_len"],
         training_mode: Bool = True,
+        return_cache: bool = False,
     ):
         """
         Defines the forward pass of MoiraiDecoderModule.
@@ -154,17 +155,35 @@ class MoiraicModule(
         )
         reprs = self.in_proj(input_tokens)
 
-        reprs = self.encoder(
-            reprs,
-            packed_causal_attention_mask(sample_id, time_id),
-            time_id=time_id,
-            var_id=variate_id,
-        )
+        attn_mask = packed_causal_attention_mask(sample_id, time_id)
+        if return_cache:
+            reprs, layer_kvs = self.encoder(
+                reprs, attn_mask, time_id=time_id, var_id=variate_id, return_kvs=True
+            )
+        else:
+            reprs = self.encoder(
+                reprs, attn_mask, time_id=time_id, var_id=variate_id
+            )
+
         if self.get_reprs:
             preds = self.out_proj(reprs)
-            return (reprs, torch.cat((loc, scale), dim=-1))
-        preds = self.out_proj(reprs)
-        if training_mode:
-            return preds, scaled_target
+            result = (reprs, torch.cat((loc, scale), dim=-1))
         else:
-            return preds * scale + loc
+            preds = self.out_proj(reprs)
+            if training_mode:
+                result = (preds, scaled_target)
+            else:
+                result = preds * scale + loc
+
+        if return_cache:
+            cache = {
+                "layer_kvs": layer_kvs,           # list[(k, v)] — post qk_proj, post norm
+                "kv_var_id": variate_id,
+                "kv_time_id": time_id,
+                "kv_sample_id": sample_id,
+                "prediction_mask": prediction_mask,
+                "loc": loc,
+                "scale": scale,
+            }
+            return result, cache
+        return result

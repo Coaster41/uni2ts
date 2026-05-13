@@ -238,10 +238,20 @@ class GroupedQueryAttention(nn.Module):
         kv_var_id: Optional[Int[torch.Tensor, "*batch kv_len"]] = None,
         query_time_id: Optional[Int[torch.Tensor, "*batch q_len"]] = None,
         kv_time_id: Optional[Int[torch.Tensor, "*batch kv_len"]] = None,
+        past_kv: Optional[
+            tuple[
+                Float[torch.Tensor, "*batch group hpg cached_len head_dim"],
+                Float[torch.Tensor, "*batch group hpg cached_len head_dim"],
+            ]
+        ] = None,
+        past_kv_var_id: Optional[Int[torch.Tensor, "*batch cached_len"]] = None,
+        past_kv_time_id: Optional[Int[torch.Tensor, "*batch cached_len"]] = None,
+        return_kv: bool = False,
     ) -> Float[torch.Tensor, "*batch q_len dim"]:
+        # 1) Project NEW tokens (Q always; K, V for the new-kv segment only)
         query = self.q_proj(query)
-        key = self.k_proj(key)
-        value = self.v_proj(value)
+        new_k = self.k_proj(key)
+        new_v = self.v_proj(value)
 
         query = self.q_norm(
             rearrange(
@@ -251,58 +261,101 @@ class GroupedQueryAttention(nn.Module):
                 hpg=self.heads_per_group,
             )
         )
-        key = self.k_norm(
+        new_k = self.k_norm(
             repeat(
-                key,
+                new_k,
                 "... kv_len (group dim) -> ... group hpg kv_len dim",
                 group=self.num_groups,
                 hpg=self.heads_per_group,
             )
         )
-        value = repeat(
-            value,
+        new_v = repeat(
+            new_v,
             "... kv_len (group dim) -> ... group hpg kv_len dim",
             group=self.num_groups,
             hpg=self.heads_per_group,
         )
 
-        query_var_id, kv_var_id = self._get_var_id(query, key, query_var_id, kv_var_id)
-        query_time_id, kv_time_id = self._get_time_id(
-            query,
-            key,
-            query_time_id,
-            kv_time_id,
+        # 2) Resolve var/time ids for the NEW K and Q. These are the ids used
+        #    for _qk_proj (RoPE / var_qk_proj) on Q and the new K only.
+        new_q_var_id, new_k_var_id = self._get_var_id(
+            query, new_k, query_var_id, kv_var_id
+        )
+        new_q_time_id, new_k_time_id = self._get_time_id(
+            query, new_k, query_time_id, kv_time_id
         )
 
+        # 3) Apply qk_proj to Q and the NEW K only. Cached K is already post-qk_proj
+        #    from the call that produced it, so we must not re-rotate it.
+        query, new_k = self._qk_proj(
+            query,
+            new_k,
+            query_var_id=new_q_var_id,
+            kv_var_id=new_k_var_id,
+            query_time_id=new_q_time_id,
+            kv_time_id=new_k_time_id,
+        )
+
+        # 4) Concatenate cache + new along the kv-length axis.
+        if past_kv is not None:
+            past_k, past_v = past_kv
+            k = torch.cat([past_k, new_k], dim=-2)
+            v = torch.cat([past_v, new_v], dim=-2)
+        else:
+            k = new_k
+            v = new_v
+
+        # 5) Capture the updated cache (post-projection, post-norm, post-qk_proj).
+        updated_kv = (k, v) if return_kv else None
+
+        # 6) Build full kv ids (cached + new) for mask/bias computation.
+        if past_kv is not None:
+            full_kv_var_id = (
+                torch.cat([past_kv_var_id, kv_var_id], dim=-1)
+                if (past_kv_var_id is not None and kv_var_id is not None)
+                else None
+            )
+            full_kv_time_id = (
+                torch.cat([past_kv_time_id, kv_time_id], dim=-1)
+                if (past_kv_time_id is not None and kv_time_id is not None)
+                else None
+            )
+            q_var_id_f, full_k_var_id = self._get_var_id(
+                query, k, query_var_id, full_kv_var_id
+            )
+            q_time_id_f, full_k_time_id = self._get_time_id(
+                query, k, query_time_id, full_kv_time_id
+            )
+        else:
+            q_var_id_f, full_k_var_id = new_q_var_id, new_k_var_id
+            q_time_id_f, full_k_time_id = new_q_time_id, new_k_time_id
+
+        # 7) Mask / attention bias against full kv.
         attn_mask = self._update_attn_mask(
             attn_mask,
             query,
-            key,
-            query_var_id=query_var_id,
-            kv_var_id=kv_var_id,
-            query_time_id=query_time_id,
-            kv_time_id=kv_time_id,
+            k,
+            query_var_id=q_var_id_f,
+            kv_var_id=full_k_var_id,
+            query_time_id=q_time_id_f,
+            kv_time_id=full_k_time_id,
         )
 
-        query, key = self._qk_proj(
-            query,
-            key,
-            query_var_id=query_var_id,
-            kv_var_id=kv_var_id,
-            query_time_id=query_time_id,
-            kv_time_id=kv_time_id,
-        )
-
+        # 8) Attend.
         out = F.scaled_dot_product_attention(
             query,
-            key,
-            value,
+            k,
+            v,
             attn_mask=attn_mask,
             dropout_p=self.attn_dropout_p,
             scale=self.softmax_scale,
         )
         out = rearrange(out, "... group hpg q_len dim -> ... q_len (group hpg dim)")
-        return self.out_proj(out)
+        out = self.out_proj(out)
+
+        if return_kv:
+            return out, updated_kv
+        return out
 
 
 class MultiQueryAttention(GroupedQueryAttention):

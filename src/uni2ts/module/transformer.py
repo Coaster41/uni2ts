@@ -50,42 +50,64 @@ class TransformerEncoderLayer(nn.Module):
     def forward(
         self,
         x: Float[torch.Tensor, "*batch time_len dim"],
-        attn_mask: Optional[Bool[torch.Tensor, "*batch time_len time_len"]] = None,
+        attn_mask: Optional[Bool[torch.Tensor, "*batch time_len kv_len"]] = None,
         var_id: Optional[Int[torch.Tensor, "*batch time_len"]] = None,
         time_id: Optional[Int[torch.Tensor, "*batch time_len"]] = None,
         centroid: Optional[Float[torch.Tensor, "expert dim"]] = None,
-    ) -> Float[torch.Tensor, "*batch time_len dim"]:
+        past_kv: Optional[tuple[torch.Tensor, torch.Tensor]] = None,
+        past_kv_var_id: Optional[torch.Tensor] = None,
+        past_kv_time_id: Optional[torch.Tensor] = None,
+        return_kv: bool = False,
+    ):
+        sa_kwargs = dict(
+            attn_mask=attn_mask,
+            var_id=var_id,
+            time_id=time_id,
+            past_kv=past_kv,
+            past_kv_var_id=past_kv_var_id,
+            past_kv_time_id=past_kv_time_id,
+            return_kv=return_kv,
+        )
         if self.pre_norm:
-            x = x + self._sa_block(
-                self.norm1(x), attn_mask, var_id=var_id, time_id=time_id
-            )
+            sa_out = self._sa_block(self.norm1(x), **sa_kwargs)
+            sa, updated_kv = (sa_out if return_kv else (sa_out, None))
+            x = x + sa
             x = x + self.ffn(self.norm2(x), centroid=centroid)
         else:
-            x = self.norm1(
-                x + self._sa_block(x, attn_mask, var_id=var_id, time_id=time_id)
-            )
+            sa_out = self._sa_block(x, **sa_kwargs)
+            sa, updated_kv = (sa_out if return_kv else (sa_out, None))
+            x = self.norm1(x + sa)
             x = self.norm2(x + self.ffn(x, centroid=centroid))
 
+        if return_kv:
+            return x, updated_kv
         return x
 
     def _sa_block(
         self,
-        x: Float[torch.Tensor, "*batch time_len dim"],
-        attn_mask: Optional[Bool[torch.Tensor, "*batch time_len time_len"]],
-        var_id: Optional[Int[torch.Tensor, "*batch time_len"]] = None,
-        time_id: Optional[Int[torch.Tensor, "*batch time_len"]] = None,
-    ) -> Float[torch.Tensor, "*batch time_len dim"]:
-        x = self.self_attn(
-            x,
-            x,
-            x,
+        x,
+        attn_mask,
+        var_id=None,
+        time_id=None,
+        past_kv=None,
+        past_kv_var_id=None,
+        past_kv_time_id=None,
+        return_kv=False,
+    ):
+        out = self.self_attn(
+            x, x, x,
             attn_mask=attn_mask,
-            query_var_id=var_id,
-            kv_var_id=var_id,
-            query_time_id=time_id,
-            kv_time_id=time_id,
+            query_var_id=var_id, kv_var_id=var_id,
+            query_time_id=time_id, kv_time_id=time_id,
+            past_kv=past_kv,
+            past_kv_var_id=past_kv_var_id,
+            past_kv_time_id=past_kv_time_id,
+            return_kv=return_kv,
         )
-        return self.dropout(x)
+        if return_kv:
+            attn_out, updated_kv = out
+            return self.dropout(attn_out), updated_kv
+        return self.dropout(out)
 
 
 class TransformerEncoder(nn.Module):
@@ -217,20 +239,37 @@ class TransformerEncoder(nn.Module):
     def forward(
         self,
         x: Float[torch.Tensor, "*batch time_len dim"],
-        attn_mask: Optional[Bool[torch.Tensor, "*batch time_len time_len"]] = None,
+        attn_mask: Optional[Bool[torch.Tensor, "*batch time_len kv_len"]] = None,
         var_id: Optional[Int[torch.Tensor, "*batch time_len"]] = None,
         time_id: Optional[Int[torch.Tensor, "*batch time_len"]] = None,
-    ) -> Float[torch.Tensor, "*batch time_len dim"]:
-        if self.use_moe:
-            for idx, layer in enumerate(self.layers):
-                x = layer(
-                    x,
-                    attn_mask,
-                    var_id=var_id,
-                    time_id=time_id,
-                    centroid=self.centroid[idx],
-                )
-        else:
-            for layer in self.layers:
-                x = layer(x, attn_mask, var_id=var_id, time_id=time_id)
-        return self.norm(x)
+        past_kvs: Optional[list[tuple[torch.Tensor, torch.Tensor]]] = None,
+        past_kv_var_id: Optional[torch.Tensor] = None,
+        past_kv_time_id: Optional[torch.Tensor] = None,
+        return_kvs: bool = False,
+    ):
+        updated_kvs = [] if return_kvs else None
+        for idx, layer in enumerate(self.layers):
+            pkv = past_kvs[idx] if past_kvs is not None else None
+            common = dict(
+                attn_mask=attn_mask,
+                var_id=var_id,
+                time_id=time_id,
+                past_kv=pkv,
+                past_kv_var_id=past_kv_var_id,
+                past_kv_time_id=past_kv_time_id,
+                return_kv=return_kvs,
+            )
+            if self.use_moe:
+                out = layer(x, centroid=self.centroid[idx], **common)
+            else:
+                out = layer(x, **common)
+            if return_kvs:
+                x, ukv = out
+                updated_kvs.append(ukv)
+            else:
+                x = out
+
+        x = self.norm(x)
+        if return_kvs:
+            return x, updated_kvs
+        return x
