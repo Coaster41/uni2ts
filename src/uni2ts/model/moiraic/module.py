@@ -299,8 +299,20 @@ class MoiraicModule(
         variate_scale = torch.ones(
             *batch_shape, num_variates, 1, dtype=scale.dtype, device=scale.device
         )
-        variate_loc.scatter_(-2, ctx_var_id.unsqueeze(-1), loc[..., :ctx_len, :])
-        variate_scale.scatter_(-2, ctx_var_id.unsqueeze(-1), scale[..., :ctx_len, :])
+
+        # Nondeterministic behavior breaks code:
+        # variate_loc.scatter_(-2, ctx_var_id.unsqueeze(-1), loc[..., :ctx_len, :])
+        # variate_scale.scatter_(-2, ctx_var_id.unsqueeze(-1), scale[..., :ctx_len, :])
+
+        # Replacement:
+        for v in range(num_variates):
+            is_pred_v = prediction_mask & (variate_id == v)        # [*B, S]
+            if not is_pred_v.any():
+                continue
+            first_v = is_pred_v & (is_pred_v.int().cumsum(-1) == 1)  # first True per row
+            b_idx, s_idx = first_v.nonzero(as_tuple=True)
+            variate_loc  [b_idx, v] = loc  [b_idx, s_idx]
+            variate_scale[b_idx, v] = scale[b_idx, s_idx]
 
         return {
             "layer_kvs": ctx_layer_kvs,
