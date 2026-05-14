@@ -52,6 +52,8 @@ class MoiraicForecast(L.LightningModule):
         context_length: int,
         module_kwargs: Optional[dict[str, Any]] = None,
         module: Optional[MoiraicModule] = None,
+        use_cache: bool = True,
+        update_context_in_ar: Optional[bool] = None,
     ):
         assert (module is not None) or (
             module_kwargs is not None
@@ -62,9 +64,19 @@ class MoiraicForecast(L.LightningModule):
             module_kwargs["dropout_p"] = 0
 
         super().__init__()
-        self.save_hyperparameters(ignore=["module"])
+        self.save_hyperparameters(ignore=["module", "use_cache", "update_context_in_ar"])
         self.module = MoiraicModule(**module_kwargs) if module is None else module
         self.module.eval()
+        self.use_cache = use_cache
+        if update_context_in_ar is None:
+            update_context_in_ar = not use_cache
+        self.update_context_in_ar = update_context_in_ar
+        if self.use_cache and self.update_context_in_ar:
+            raise ValueError(
+                "use_cache=True is incompatible with update_context_in_ar=True: "
+                "the cache freezes loc/scale at context-only and cannot represent "
+                "AR commits being folded into the scaler. Set one of them to False."
+            )
 
     @contextmanager
     def hparams_context(
@@ -264,15 +276,20 @@ class MoiraicForecast(L.LightningModule):
             patch_size=self.module.patch_size,
         ).clone()
 
-        preds = self.module(
-            target,
-            observed_mask,
-            sample_id,
-            time_id,
-            variate_id,
-            prediction_mask,
-            training_mode=False,
-        )
+        will_ar = per_var_predict_token > self.module.num_predict_token
+        use_cache = self.use_cache and will_ar
+
+        # ---------------- Prefill ----------------
+        if use_cache:
+            preds, cache = self.module(
+                target, observed_mask, sample_id, time_id, variate_id, prediction_mask,
+                training_mode=False, return_cache=True,
+            )
+        else:
+            preds = self.module(
+                target, observed_mask, sample_id, time_id, variate_id, prediction_mask,
+                training_mode=False,
+            )
 
         def structure_multi_predict(
             per_var_predict_token,
@@ -299,7 +316,8 @@ class MoiraicForecast(L.LightningModule):
             )
             return preds, adjusted_assign_index
 
-        if per_var_predict_token <= self.module.num_predict_token:
+        # ---------------- Single-shot exit (no AR) ----------------
+        if not will_ar:
             preds, adjusted_assign_index = structure_multi_predict(
                 per_var_predict_token,
                 pred_index,
@@ -313,126 +331,144 @@ class MoiraicForecast(L.LightningModule):
                 quantile_prediction,
                 self.hparams.target_dim,
             )
-        else:
-            # expand batch_size to batch_size, num_quantiles for recursive quantile forecast
-            expand_target = repeat(
-                target,
-                "batch_size ...  -> batch_size num_quantiles ...",
-                num_quantiles=len(self.module.quantile_levels),
-                batch_size=target.shape[0],
-            ).clone()
-            expand_prediction_mask = repeat(
-                prediction_mask,
-                "batch_size ...  -> batch_size num_quantiles ...",
-                num_quantiles=len(self.module.quantile_levels),
-                batch_size=target.shape[0],
-            ).clone()
-            expand_observed_mask = repeat(
-                observed_mask,
-                "batch_size ...  -> batch_size num_quantiles ...",
-                num_quantiles=len(self.module.quantile_levels),
-                batch_size=target.shape[0],
-            ).clone()
-            expand_sample_id = repeat(
-                sample_id,
-                "batch_size ...  -> batch_size num_quantiles ...",
-                num_quantiles=len(self.module.quantile_levels),
-                batch_size=target.shape[0],
-            ).clone()
-            expand_time_id = repeat(
-                time_id,
-                "batch_size ...  -> batch_size num_quantiles ...",
-                num_quantiles=len(self.module.quantile_levels),
-                batch_size=target.shape[0],
-            ).clone()
-            expand_variate_id = repeat(
-                variate_id,
-                "batch_size ...  -> batch_size num_quantiles ...",
-                num_quantiles=len(self.module.quantile_levels),
-                batch_size=target.shape[0],
-            ).clone()
 
-            preds, adjusted_assign_index = structure_multi_predict(
-                self.module.num_predict_token,
-                pred_index,
-                assign_index,
-                preds,
-            )
-            quantile_prediction[..., adjusted_assign_index, :, :] = preds
+        # ---------------- AR path ----------------
+        expand_target = repeat(
+            target,
+            "batch_size ...  -> batch_size num_quantiles ...",
+            num_quantiles=len(self.module.quantile_levels),
+            batch_size=target.shape[0],
+        ).clone()
+        expand_prediction_mask = repeat(
+            prediction_mask,
+            "batch_size ...  -> batch_size num_quantiles ...",
+            num_quantiles=len(self.module.quantile_levels),
+            batch_size=target.shape[0],
+        ).clone()
+        expand_observed_mask = repeat(
+            observed_mask,
+            "batch_size ...  -> batch_size num_quantiles ...",
+            num_quantiles=len(self.module.quantile_levels),
+            batch_size=target.shape[0],
+        ).clone()
+        expand_sample_id = repeat(
+            sample_id,
+            "batch_size ...  -> batch_size num_quantiles ...",
+            num_quantiles=len(self.module.quantile_levels),
+            batch_size=target.shape[0],
+        ).clone()
+        expand_time_id = repeat(
+            time_id,
+            "batch_size ...  -> batch_size num_quantiles ...",
+            num_quantiles=len(self.module.quantile_levels),
+            batch_size=target.shape[0],
+        ).clone()
+        expand_variate_id = repeat(
+            variate_id,
+            "batch_size ...  -> batch_size num_quantiles ...",
+            num_quantiles=len(self.module.quantile_levels),
+            batch_size=target.shape[0],
+        ).clone()
 
-            # choose current quantiles values as point forecast for next-step prediction
-            expand_target[..., adjusted_assign_index, :] = rearrange(
-                preds,
-                "... predict_token num_quantiles patch_size -> ... num_quantiles predict_token patch_size",
-                num_quantiles=self.module.num_quantiles,
-                patch_size=self.module.patch_size,
-                predict_token=self.module.num_predict_token,
+        if use_cache:
+            cache = self._expand_cache_for_quantiles(
+                cache, num_quantiles=len(self.module.quantile_levels),
             )
+
+        preds, adjusted_assign_index = structure_multi_predict(
+            self.module.num_predict_token, pred_index, assign_index, preds,
+        )
+        quantile_prediction[..., adjusted_assign_index, :, :] = preds
+        expand_target[..., adjusted_assign_index, :] = rearrange(
+            preds,
+            "... predict_token num_quantiles patch_size -> ... num_quantiles predict_token patch_size",
+            num_quantiles=self.module.num_quantiles,
+            patch_size=self.module.patch_size,
+            predict_token=self.module.num_predict_token,
+        )
+
+        # *** KEY DIVERGENCE ***
+        # use_cache=True: keep prediction_mask=True at committed positions so the
+        # scaler-input mask `observed * ~prediction_mask` stays False there. This
+        # matches the cache's frozen loc/scale (computed at prefill from context
+        # only). Committed AR predictions remain "prediction" semantically.
+        #
+        # use_cache=False: original behavior — AR predictions become context;
+        # scaler stats grow with each step.
+        if self.update_context_in_ar:
             expand_prediction_mask[..., adjusted_assign_index] = False
 
-            remain_step = per_var_predict_token - self.module.num_predict_token
-            while remain_step > 0:
+        remain_step = per_var_predict_token - self.module.num_predict_token
+        while remain_step > 0:
+            if use_cache:
+                # Decode path: feed only the prediction-window slice; cache
+                # contributes the context K/V.
                 preds = self.module(
-                    expand_target,
-                    expand_observed_mask,
-                    expand_sample_id,
-                    expand_time_id,
-                    expand_variate_id,
+                    expand_target[..., total_context_token:, :],
+                    expand_observed_mask[..., total_context_token:, :],
+                    expand_sample_id[..., total_context_token:],
+                    expand_time_id[..., total_context_token:],
+                    expand_variate_id[..., total_context_token:],
+                    expand_prediction_mask[..., total_context_token:],
+                    training_mode=False,
+                    past_cache=cache,
+                )
+            else:
+                preds = self.module(
+                    expand_target, expand_observed_mask,
+                    expand_sample_id, expand_time_id, expand_variate_id,
                     expand_prediction_mask,
                     training_mode=False,
                 )
 
-                pred_index = assign_index + self.module.num_predict_token - 1
-                assign_index = pred_index + 1
-                preds, adjusted_assign_index = structure_multi_predict(
-                    (
-                        self.module.num_predict_token
-                        if remain_step - self.module.num_predict_token > 0
-                        else remain_step
-                    ),
-                    pred_index,
-                    assign_index,
-                    preds,
-                )
-                quantile_prediction_next_step = rearrange(
-                    preds,
-                    "... num_quantiles_prev pred_index num_quantiles patch_size -> ... pred_index (num_quantiles_prev num_quantiles) patch_size",
-                    num_quantiles=self.module.num_quantiles,
-                    patch_size=self.module.patch_size,
-                )
-                # compute quantile forecast based on quantile forecast from quantile samples
-                quantile_prediction_next_step = torch.quantile(
-                    quantile_prediction_next_step,
-                    torch.tensor(
-                        self.module.quantile_levels,
-                        device=self.device,
-                        dtype=torch.float32,
-                    ),
-                    dim=-2,
-                )
-                quantile_prediction[..., adjusted_assign_index, :, :] = rearrange(
-                    quantile_prediction_next_step,
-                    "num_quantiles ... patch_size -> ... num_quantiles patch_size",
-                )
+            pred_index = assign_index + self.module.num_predict_token - 1
+            assign_index = pred_index + 1
 
-                # choose current quantiles values as point forecast for next-step prediction
-                expand_target[..., adjusted_assign_index, :] = rearrange(
-                    quantile_prediction_next_step,
-                    "num_quantiles batch_size predict_token patch_size -> batch_size num_quantiles predict_token patch_size",
-                    num_quantiles=self.module.num_quantiles,
-                    patch_size=self.module.patch_size,
-                    predict_token=len(adjusted_assign_index),
-                )
+            # In the decode path, `preds` covers only the prediction window, so
+            # pred_index (full-sequence indices into the prediction window) must
+            # be shifted relative to that slice.
+            pred_index_for_struct = pred_index - total_context_token if use_cache else pred_index
+
+            preds, adjusted_assign_index = structure_multi_predict(
+                (self.module.num_predict_token
+                if remain_step - self.module.num_predict_token > 0
+                else remain_step),
+                pred_index_for_struct,
+                assign_index,
+                preds,
+            )
+            quantile_prediction_next_step = rearrange(
+                preds,
+                "... num_quantiles_prev pred_index num_quantiles patch_size -> ... pred_index (num_quantiles_prev num_quantiles) patch_size",
+                num_quantiles=self.module.num_quantiles,
+                patch_size=self.module.patch_size,
+            )
+            quantile_prediction_next_step = torch.quantile(
+                quantile_prediction_next_step,
+                torch.tensor(self.module.quantile_levels, device=self.device, dtype=torch.float32),
+                dim=-2,
+            )
+            quantile_prediction[..., adjusted_assign_index, :, :] = rearrange(
+                quantile_prediction_next_step,
+                "num_quantiles ... patch_size -> ... num_quantiles patch_size",
+            )
+
+            expand_target[..., adjusted_assign_index, :] = rearrange(
+                quantile_prediction_next_step,
+                "num_quantiles batch_size predict_token patch_size -> batch_size num_quantiles predict_token patch_size",
+                num_quantiles=self.module.num_quantiles,
+                patch_size=self.module.patch_size,
+                predict_token=len(adjusted_assign_index),
+            )
+            if self.update_context_in_ar:
                 expand_prediction_mask[..., adjusted_assign_index] = False
 
-                remain_step -= self.module.num_predict_token
+            remain_step -= self.module.num_predict_token
 
-            return self._format_preds(
-                self.module.num_quantiles,
-                self.module.patch_size,
-                quantile_prediction,
-                self.hparams.target_dim,
-            )
+        return self._format_preds(
+            self.module.num_quantiles, self.module.patch_size,
+            quantile_prediction, self.hparams.target_dim,
+        )
 
     def predict(
         self,
@@ -1015,6 +1051,26 @@ class MoiraicForecast(L.LightningModule):
             dim=target_dim,
         )[..., : self.hparams.prediction_length, :]
         return preds.squeeze(-1)
+    
+    @staticmethod
+    def _expand_cache_for_quantiles(cache: dict, num_quantiles: int) -> dict:
+        """
+        Broadcast a context-only cache produced by MoiraicModule(prefill) along a
+        new num_quantiles axis: shape [B, ...] -> [B, Q, ...]. Used at the
+        quantile-branching boundary when per_var_predict_token > num_predict_token.
+        """
+        def exp(t: torch.Tensor) -> torch.Tensor:
+            return repeat(t, "b ... -> b q ...", q=num_quantiles)
+
+        return {
+            "layer_kvs":     [(exp(k), exp(v)) for (k, v) in cache["layer_kvs"]],
+            "kv_var_id":     exp(cache["kv_var_id"]),
+            "kv_time_id":    exp(cache["kv_time_id"]),
+            "kv_sample_id":  exp(cache["kv_sample_id"]),
+            "variate_loc":   exp(cache["variate_loc"]),
+            "variate_scale": exp(cache["variate_scale"]),
+            "ctx_len":       cache["ctx_len"],
+        }
 
     def get_default_transform(self) -> Transformation:
         transform = AsNumpyArray(
