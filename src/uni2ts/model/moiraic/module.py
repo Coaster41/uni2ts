@@ -14,6 +14,7 @@
 #  limitations under the License.
 
 from functools import partial
+from typing import Optional
 
 import torch
 import torch.nn.functional as F
@@ -121,6 +122,7 @@ class MoiraicModule(
         variate_id: Int[torch.Tensor, "*batch seq_len"],
         prediction_mask: Bool[torch.Tensor, "*batch seq_len"],
         training_mode: Bool = True,
+        past_cache: Optional[dict] = None,
         return_cache: bool = False,
     ):
         """
@@ -143,47 +145,169 @@ class MoiraicModule(
         :param training_mode: whether to use training mode (inference mode)
         :return: predictive distribution
         """
-        loc, scale = self.scaler(
-            target,
-            observed_mask * ~prediction_mask.unsqueeze(-1),
-            sample_id,
-            variate_id,
-        )
-        scaled_target = (target - loc) / scale
+        if past_cache is None:
+            # ------------------------------------------------------------------
+            # Prefill path
+            # ------------------------------------------------------------------
+            loc, scale = self.scaler(
+                target,
+                observed_mask * ~prediction_mask.unsqueeze(-1),
+                sample_id,
+                variate_id,
+            )
+            scaled_target = (target - loc) / scale
+            input_tokens = torch.cat(
+                [scaled_target, observed_mask.to(torch.float32)], dim=-1
+            )
+            reprs = self.in_proj(input_tokens)
+
+            attn_mask = packed_causal_attention_mask(sample_id, time_id)
+            if return_cache:
+                reprs, layer_kvs = self.encoder(
+                    reprs, attn_mask, time_id=time_id, var_id=variate_id,
+                    return_kvs=True,
+                )
+            else:
+                reprs = self.encoder(
+                    reprs, attn_mask, time_id=time_id, var_id=variate_id,
+                )
+
+            if self.get_reprs:
+                preds = self.out_proj(reprs)
+                result = (reprs, torch.cat((loc, scale), dim=-1))
+            else:
+                preds = self.out_proj(reprs)
+                if training_mode:
+                    result = (preds, scaled_target)
+                else:
+                    result = preds * scale + loc
+
+            if return_cache:
+                cache = self._build_context_cache(
+                    layer_kvs=layer_kvs,
+                    sample_id=sample_id,
+                    time_id=time_id,
+                    variate_id=variate_id,
+                    prediction_mask=prediction_mask,
+                    loc=loc,
+                    scale=scale,
+                )
+                return result, cache
+            return result
+
+        # ----------------------------------------------------------------------
+        # Decode path — `target`, `observed_mask`, ids, `prediction_mask` cover
+        # only the NEW tokens (caller is responsible for slicing).
+        # ----------------------------------------------------------------------
+        # 1) Look up loc/scale per new token using its variate_id.
+        var_idx = variate_id.unsqueeze(-1)  # [..., new_len, 1]
+        new_loc = past_cache["variate_loc"].gather(-2, var_idx)     # [..., new_len, 1]
+        new_scale = past_cache["variate_scale"].gather(-2, var_idx) # [..., new_len, 1]
+
+        # 2) Scale + project new tokens.
+        scaled_target = (target - new_loc) / new_scale
         input_tokens = torch.cat(
             [scaled_target, observed_mask.to(torch.float32)], dim=-1
         )
         reprs = self.in_proj(input_tokens)
 
-        attn_mask = packed_causal_attention_mask(sample_id, time_id)
-        if return_cache:
-            reprs, layer_kvs = self.encoder(
-                reprs, attn_mask, time_id=time_id, var_id=variate_id, return_kvs=True
-            )
-        else:
-            reprs = self.encoder(
-                reprs, attn_mask, time_id=time_id, var_id=variate_id
-            )
+        # 3) Build attention mask spanning [cached_ctx ⊕ new] keys.
+        full_sample_id = torch.cat([past_cache["kv_sample_id"], sample_id], dim=-1)
+        full_time_id = torch.cat([past_cache["kv_time_id"], time_id], dim=-1)
+        new_len = target.shape[-2]
+        decode_attn_mask = packed_causal_attention_mask(
+            full_sample_id, full_time_id
+        )[..., -new_len:, :]
 
+        # 4) Encoder over new tokens with cached context K/V.
+        reprs = self.encoder(
+            reprs,
+            decode_attn_mask,
+            time_id=time_id,
+            var_id=variate_id,
+            past_kvs=past_cache["layer_kvs"],
+            past_kv_var_id=past_cache["kv_var_id"],
+            past_kv_time_id=past_cache["kv_time_id"],
+            return_kvs=False,  # context cache is invariant; nothing to update
+        )
+
+        # 5) Output projection on new tokens only.
         if self.get_reprs:
             preds = self.out_proj(reprs)
-            result = (reprs, torch.cat((loc, scale), dim=-1))
+            result = (reprs, torch.cat((new_loc, new_scale), dim=-1))
         else:
             preds = self.out_proj(reprs)
             if training_mode:
                 result = (preds, scaled_target)
             else:
-                result = preds * scale + loc
+                result = preds * new_scale + new_loc
 
         if return_cache:
-            cache = {
-                "layer_kvs": layer_kvs,           # list[(k, v)] — post qk_proj, post norm
-                "kv_var_id": variate_id,
-                "kv_time_id": time_id,
-                "kv_sample_id": sample_id,
-                "prediction_mask": prediction_mask,
-                "loc": loc,
-                "scale": scale,
-            }
-            return result, cache
+            # Pass through the same context cache for chained AR calls.
+            return result, past_cache
         return result
+
+
+    def _build_context_cache(
+        self,
+        layer_kvs,
+        sample_id,
+        time_id,
+        variate_id,
+        prediction_mask,
+        loc,
+        scale,
+    ) -> dict:
+        """
+        Filter the prefill cache down to context positions only and build
+        a per-variate (loc, scale) lookup so that decode can rescale new
+        tokens without re-running the scaler.
+
+        Assumes the moiraic forecast layout: context positions form a
+        contiguous prefix, prediction positions a contiguous suffix.
+        """
+        ctx_mask = ~prediction_mask  # [*B, S]; True where token is context
+        # The forecast layout guarantees a contiguous context prefix; assert
+        # so a future caller that violates it fails loudly here rather than
+        # silently corrupting the cache.
+        ctx_lens = ctx_mask.sum(dim=-1)
+        ctx_len = int(ctx_lens.flatten()[0].item())
+        assert (ctx_lens == ctx_len).all(), (
+            "MoiraicModule cache assumes a uniform, contiguous context prefix; "
+            f"got per-row context lengths {ctx_lens.tolist()}"
+        )
+
+        # Slice K/V along seq dim. layer_kvs[i] = (k, v) of shape
+        # [..., group, hpg, S, head_dim]; we keep [..., :ctx_len, :].
+        ctx_layer_kvs = [
+            (k[..., :ctx_len, :].contiguous(), v[..., :ctx_len, :].contiguous())
+            for (k, v) in layer_kvs
+        ]
+        ctx_var_id = variate_id[..., :ctx_len]
+        ctx_time_id = time_id[..., :ctx_len]
+        ctx_sample_id = sample_id[..., :ctx_len]
+
+        # Build per-variate loc/scale lookup tables: shape [*B, num_variates, 1].
+        # PackedStdScaler emits the same loc/scale for every position sharing a
+        # (sample_id, variate_id) group; for a single-sample sequence (the
+        # forecast case) this collapses to a per-variate table.
+        num_variates = int(variate_id.max().item()) + 1
+        batch_shape = variate_id.shape[:-1]
+        variate_loc = torch.zeros(
+            *batch_shape, num_variates, 1, dtype=loc.dtype, device=loc.device
+        )
+        variate_scale = torch.ones(
+            *batch_shape, num_variates, 1, dtype=scale.dtype, device=scale.device
+        )
+        variate_loc.scatter_(-2, ctx_var_id.unsqueeze(-1), loc[..., :ctx_len, :])
+        variate_scale.scatter_(-2, ctx_var_id.unsqueeze(-1), scale[..., :ctx_len, :])
+
+        return {
+            "layer_kvs": ctx_layer_kvs,
+            "kv_var_id": ctx_var_id,
+            "kv_time_id": ctx_time_id,
+            "kv_sample_id": ctx_sample_id,
+            "variate_loc": variate_loc,
+            "variate_scale": variate_scale,
+            "ctx_len": ctx_len,
+        }
