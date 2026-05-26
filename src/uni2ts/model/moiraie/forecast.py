@@ -52,6 +52,8 @@ class MoiraieForecast(L.LightningModule):
         context_length: int,
         module_kwargs: Optional[dict[str, Any]] = None,
         module: Optional[MoiraieModule] = None,
+        ar_method: Optional[str] = None,        # None | "naive" | "branch"
+        ar_num_patches: int = 1,                # patches committed per AR step
     ):
         assert (module is not None) or (
             module_kwargs is not None
@@ -62,9 +64,14 @@ class MoiraieForecast(L.LightningModule):
             module_kwargs["dropout_p"] = 0
 
         super().__init__()
-        self.save_hyperparameters(ignore=["module"])
+        self.save_hyperparameters(ignore=["module", "ar_method", "ar_num_patches"])
         self.module = MoiraieModule(**module_kwargs) if module is None else module
         self.module.eval()
+
+        assert ar_method in (None, "naive", "branch"), f"unknown ar_method={ar_method!r}"
+        assert ar_num_patches >= 1
+        self.ar_method = ar_method
+        self.ar_num_patches = ar_num_patches
 
     @contextmanager
     def hparams_context(
@@ -242,6 +249,7 @@ class MoiraieForecast(L.LightningModule):
         total_context_token = self.hparams.target_dim * per_var_context_token
         per_var_predict_token = self.prediction_token_length(self.module.patch_size)
         total_predict_token = self.hparams.target_dim * per_var_predict_token
+        Q = len(self.module.quantile_levels)
 
         # In the case of 3 variables, per_var_context_token=3, per_var_predict_token=2.
         # The variate_id is: 0 0 0 1 1 1 2 2 2 [p0] [p0] [p1] [p1] [p2] [p2]
@@ -250,48 +258,136 @@ class MoiraieForecast(L.LightningModule):
         pred_index = torch.arange(
             start=total_context_token,
             end=total_context_token + total_predict_token,
-            step=per_var_predict_token, # this should always be 1
+            step=1, # this should always be 1
         )
-        # assign_index = torch.arange(
-        #     start=total_context_token,
-        #     end=total_context_token + total_predict_token,
-        #     step=per_var_predict_token,
-        # )
         quantile_prediction = repeat(
             target,
             "... patch_size -> ... num_quantiles patch_size",
-            num_quantiles=len(self.module.quantile_levels),
-            patch_size=self.module.patch_size,
+            num_quantiles=Q, patch_size=self.module.patch_size,
         ).clone()
 
-        preds = self.module(
-            target,
-            observed_mask,
-            sample_id,
-            time_id,
-            variate_id,
-            prediction_mask,
-            training_mode=False,
-        )
+        def commit_indices(committed, step):
+            return torch.cat([
+                torch.arange(
+                    total_context_token + v * per_var_predict_token + committed,
+                    total_context_token + v * per_var_predict_token + committed + step,
+                    device=target.device,
+                )
+                for v in range(self.hparams.target_dim)
+            ])
 
-        # Each prediction token reconstructs itself (and optionally the next num_predict_token-1 patches)
-        preds_at_pred = rearrange(
-            preds[..., pred_index, :],
-            "... seq (predict_token num_quantiles patch_size) -> ... (seq predict_token) num_quantiles patch_size",
-            predict_token=self.module.num_predict_token,
-            num_quantiles=self.module.num_quantiles,
-            patch_size=self.module.patch_size,
-        )
+        def run_and_extract(t, om, sid, tid, vid, pm):
+            preds = self.module(t, om, sid, tid, vid, pm, training_mode=False)
+            return rearrange(
+                preds[..., pred_index, :],
+                "... seq (predict_token num_quantiles patch_size) "
+                "-> ... (seq predict_token) num_quantiles patch_size",
+                predict_token=self.module.num_predict_token,
+                num_quantiles=self.module.num_quantiles,
+                patch_size=self.module.patch_size,
+            )
+        
+        will_ar = (self.ar_method is not None) and (self.ar_num_patches < per_var_predict_token)
 
-        # With num_predict_token=1, this is a direct 1:1 assignment
-        quantile_prediction[..., pred_index, :, :] = preds_at_pred
+        # ---------------- Single-shot (default) ----------------
+        if not will_ar:
+            preds_at_pred = run_and_extract(
+                target, observed_mask, sample_id, time_id, variate_id, prediction_mask,
+            )
+            quantile_prediction[..., pred_index, :, :] = preds_at_pred
+            return self._format_preds(
+                self.module.num_quantiles, self.module.patch_size,
+                quantile_prediction, self.hparams.target_dim,
+            )
 
-        return self._format_preds(
-            self.module.num_quantiles,
-            self.module.patch_size,
-            quantile_prediction,
-            self.hparams.target_dim,
-        )
+        # ---------------- Naive AR ----------------
+        if self.ar_method == "naive":
+            qlevels = list(self.module.quantile_levels)
+            median_idx = min(range(Q), key=lambda i: abs(qlevels[i] - 0.5))
+
+            committed = 0
+            while committed < per_var_predict_token:
+                preds_at_pred = run_and_extract(
+                    target, observed_mask, sample_id, time_id, variate_id, prediction_mask,
+                )
+                step = min(self.ar_num_patches, per_var_predict_token - committed)
+                commit = commit_indices(committed, step)
+                slot   = commit - total_context_token
+
+                preds_commit = preds_at_pred[..., slot, :, :]
+                quantile_prediction[..., commit, :, :] = preds_commit
+                target[..., commit, :]            = preds_commit[..., median_idx, :]
+                prediction_mask[..., commit]      = False
+                observed_mask[..., commit, :]     = True
+                committed += step
+
+            return self._format_preds(
+                self.module.num_quantiles, self.module.patch_size,
+                quantile_prediction, self.hparams.target_dim,
+            )
+        
+        # ---------------- Branching AR ----------------
+        if self.ar_method == "branch":
+            # First step: prefill (no quantile axis yet)
+            preds_at_pred = run_and_extract(
+                target, observed_mask, sample_id, time_id, variate_id, prediction_mask,
+            )
+            step = min(self.ar_num_patches, per_var_predict_token)
+            commit = commit_indices(0, step)
+            slot   = commit - total_context_token
+            preds_commit = preds_at_pred[..., slot, :, :]          # [B, commit, Q, P]
+            quantile_prediction[..., commit, :, :] = preds_commit
+
+            # Expand to [B, Q, ...] for the rest of AR
+            def expand(t): return repeat(t, "b ... -> b q ...", q=Q).clone()
+            e_target          = expand(target)
+            e_observed_mask   = expand(observed_mask)
+            e_sample_id       = expand(sample_id)
+            e_time_id         = expand(time_id)
+            e_variate_id      = expand(variate_id)
+            e_prediction_mask = expand(prediction_mask)
+
+            # Each quantile branch keeps its own committed value as context
+            e_target[..., commit, :] = rearrange(
+                preds_commit, "b commit q p -> b q commit p",
+            )
+            e_prediction_mask[..., commit] = False
+            e_observed_mask[..., commit, :] = True
+
+            committed = step
+            while committed < per_var_predict_token:
+                step = min(self.ar_num_patches, per_var_predict_token - committed)
+                commit = commit_indices(committed, step)
+                slot   = commit - total_context_token
+
+                preds_at_pred = run_and_extract(
+                    e_target, e_observed_mask, e_sample_id, e_time_id, e_variate_id, e_prediction_mask,
+                )  # [B, Q_prev, total_predict_token, Q, P]
+                preds_commit = preds_at_pred[..., slot, :, :]      # [B, Q_prev, commit, Q, P]
+
+                # Aggregate Q_prev * Q samples back into Q quantiles
+                merged = rearrange(
+                    preds_commit,
+                    "b qp commit q p -> b commit (qp q) p",
+                )
+                agg = torch.quantile(
+                    merged,
+                    torch.tensor(self.module.quantile_levels, device=self.device, dtype=torch.float32),
+                    dim=-2,
+                )                                                  # [Q, B, commit, P]
+                agg = rearrange(agg, "q b commit p -> b commit q p")
+
+                quantile_prediction[..., commit, :, :] = agg
+                e_target[..., commit, :] = rearrange(agg, "b commit q p -> b q commit p")
+                e_prediction_mask[..., commit] = False
+                e_observed_mask[..., commit, :] = True
+                committed += step
+
+            return self._format_preds(
+                self.module.num_quantiles, self.module.patch_size,
+                quantile_prediction, self.hparams.target_dim,
+            )
+
 
         '''
         def structure_multi_predict(
@@ -581,89 +677,18 @@ class MoiraieForecast(L.LightningModule):
         past_observed_t = data_entry["past_observed_target"]
         past_is_pad_t = data_entry["past_is_pad"]
 
-        # Zero-filled future target for the entire prediction horizon
-        future_target = torch.zeros(
-            (batch_size, prediction_length, target_dim),
-            dtype=torch.float32,
-            device=self.device,
-        )
-        # Future is unobserved (will be reconstructed by encoder)
-        future_observed_target = torch.ones(
-            (batch_size, prediction_length, target_dim),
-            dtype=torch.bool,
-            device=self.device,
-        )
-
-        # Convert full sequence into patched token representation
-        (
-            target,
-            observed_mask,
-            sample_id,
-            time_id,
-            variate_id,
-            prediction_mask,
-        ) = self._convert(
-            self.module.patch_size,
-            past_target_t,
-            past_observed_t,
-            past_is_pad_t,
-            future_target=future_target,
-            future_observed_target=future_observed_target,
-            feat_dynamic_real=data_entry.get("feat_dynamic_real"),
-            observed_feat_dynamic_real=data_entry.get("observed_feat_dynamic_real"),
-            past_feat_dynamic_real=data_entry.get("past_feat_dynamic_real"),
-            past_observed_feat_dynamic_real=data_entry.get("past_observed_feat_dynamic_real"),
-        )
-
         # Single forward pass through the encoder
         with torch.no_grad():
-            preds = self.module(
-                target,
-                observed_mask,
-                sample_id,
-                time_id,
-                variate_id,
-                prediction_mask,
-                training_mode=False,
-            )
-
-        # Extract predictions from all prediction token positions
-        per_var_context_token = self.context_token_length(self.module.patch_size)
-        total_context_token = self.hparams.target_dim * per_var_context_token
-        per_var_predict_token = self.prediction_token_length(self.module.patch_size)
-        total_predict_token = self.hparams.target_dim * per_var_predict_token
-
-        pred_index = torch.arange(
-            start=total_context_token,
-            end=total_context_token + total_predict_token,
-            device=self.device,
-        )
-
-        quantile_prediction = repeat(
-            target,
-            "... patch_size -> ... num_quantiles patch_size",
-            num_quantiles=len(self.module.quantile_levels),
-            patch_size=self.module.patch_size,
-        ).clone()
-
-        preds_at_pred = rearrange(
-            preds[..., pred_index, :],
-            "... seq (predict_token num_quantiles patch_size) -> ... (seq predict_token) num_quantiles patch_size",
-            predict_token=self.module.num_predict_token,
-            num_quantiles=self.module.num_quantiles,
-            patch_size=self.module.patch_size,
-        )
-
-        quantile_prediction[..., pred_index, :, :] = preds_at_pred
-
-        predictions = self._format_preds(
-            self.module.num_quantiles,
-            self.module.patch_size,
-            quantile_prediction,
-            self.hparams.target_dim,
-        )
-
-        return predictions.detach().cpu().numpy()
+            predictions = self(
+                past_target_t,
+                past_observed_t,
+                past_is_pad_t,
+                feat_dynamic_real=data_entry.get("feat_dynamic_real"),
+                observed_feat_dynamic_real=data_entry.get("observed_feat_dynamic_real"),
+                past_feat_dynamic_real=data_entry.get("past_feat_dynamic_real"),
+                past_observed_feat_dynamic_real=data_entry.get("past_observed_feat_dynamic_real")
+            ).detach().cpu().numpy()
+        return predictions
         
 
     @staticmethod
