@@ -169,7 +169,8 @@ datasets/
 slurm/
 outputs/
 diagnostics/
-PLAN.md
+PLAN*.md
 CLAUDE.md
 HANDOFF*
 experiments/mech_interp/block1_probing/figures
+experiments/mech_interp/block1_probing/results

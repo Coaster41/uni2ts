@@ -15,6 +15,11 @@ matplotlib.use("Agg")
 import pytest
 
 from experiments.mech_interp.block1_probing.plot_probes import load_results, load_metadata, plot_probes
+from experiments.mech_interp.block1_probing.plot_probes_patch import (
+    load_per_patch_results,
+    plot_probes_patch,
+    _scores_to_grid,
+)
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -24,6 +29,22 @@ def _write_model_json(directory: str, model_name: str, features: dict[str, dict[
     path = os.path.join(directory, f"{model_name}.json")
     with open(path, "w") as f:
         json.dump(features, f)
+    return path
+
+
+def _write_per_patch_json(directory: str, model_name: str,
+                           features: dict, n_layers: int = 2, n_patches: int = 4) -> str:
+    """Write a minimal per-patch results JSON with string keys at both levels."""
+    data = {
+        feat: {
+            str(l): {str(p): float(l * 0.1 + p * 0.01) for p in range(n_patches)}
+            for l in range(n_layers)
+        }
+        for feat in features
+    }
+    path = os.path.join(directory, f"{model_name}_per_patch.json")
+    with open(path, "w") as f:
+        json.dump(data, f)
     return path
 
 
@@ -161,3 +182,94 @@ class TestPlotProbes:
 
         assert (figures_dir / "probe_slope.pdf").exists()
         assert (figures_dir / "probe_period_idx.pdf").exists()
+
+
+# ── Per-patch plot tests (PR-5a) ──────────────────────────────────────────────
+
+class TestLoadPerPatchResults:
+    def test_nested_string_keys_converted_to_int(self, tmp_path):
+        """Layer and patch keys must both be converted from string to int."""
+        data = {"slope": {"0": {"0": 0.1, "31": 0.9}, "7": {"0": 0.5, "31": 0.95}}}
+        p = tmp_path / "m_per_patch.json"
+        p.write_text(json.dumps(data))
+        result = load_per_patch_results(str(p))
+        assert result["slope"][0][31] == pytest.approx(0.9)
+        assert result["slope"][7][0] == pytest.approx(0.5)
+
+    def test_multiple_features(self, tmp_path):
+        data = {
+            "slope": {"0": {"0": 0.1}},
+            "period_idx": {"0": {"0": 0.2}},
+        }
+        p = tmp_path / "m_per_patch.json"
+        p.write_text(json.dumps(data))
+        result = load_per_patch_results(str(p))
+        assert set(result.keys()) == {"slope", "period_idx"}
+
+
+class TestScoresToGrid:
+    def test_shape(self):
+        layer_dict = {0: {0: 0.1, 1: 0.2}, 1: {0: 0.3, 1: 0.4}}
+        grid = _scores_to_grid(layer_dict)
+        assert grid.shape == (2, 2)
+        assert grid[0, 1] == pytest.approx(0.2)
+        assert grid[1, 0] == pytest.approx(0.3)
+
+
+class TestPlotProbesPatch:
+    def test_creates_heatmap_and_slice_pdfs(self, tmp_path):
+        """Both probe_patch_*.pdf and probe_patch_slice_*.pdf must be created per feature."""
+        results_dir = tmp_path / "results"
+        figures_dir = tmp_path / "figures"
+        results_dir.mkdir()
+
+        for model in ("model_a", "model_b"):
+            _write_per_patch_json(str(results_dir), model, ["slope", "period_idx"])
+
+        plot_probes_patch(str(results_dir), str(figures_dir))
+
+        assert (figures_dir / "probe_patch_slope.pdf").exists()
+        assert (figures_dir / "probe_patch_period_idx.pdf").exists()
+        assert (figures_dir / "probe_patch_slice_slope.pdf").exists()
+        assert (figures_dir / "probe_patch_slice_period_idx.pdf").exists()
+
+    def test_missing_feature_in_one_model_no_crash(self, tmp_path):
+        """One model missing a feature → skip that model's contribution, no crash."""
+        results_dir = tmp_path / "results"
+        figures_dir = tmp_path / "figures"
+        results_dir.mkdir()
+
+        _write_per_patch_json(str(results_dir), "model_a", ["slope"])
+        _write_per_patch_json(str(results_dir), "model_b", ["log_noise_var"])
+
+        plot_probes_patch(str(results_dir), str(figures_dir))
+
+        assert (figures_dir / "probe_patch_slope.pdf").exists()
+        assert (figures_dir / "probe_patch_log_noise_var.pdf").exists()
+
+    def test_no_per_patch_files_exits_cleanly(self, tmp_path):
+        """No *_per_patch.json → no crash, no figures created."""
+        results_dir = tmp_path / "results"
+        figures_dir = tmp_path / "figures"
+        results_dir.mkdir()
+        # Only a regular (non-per-patch) model json
+        _write_model_json(str(results_dir), "model_a", {"slope": _tiny_scores(2)})
+
+        plot_probes_patch(str(results_dir), str(figures_dir))
+
+        if figures_dir.exists():
+            assert list(figures_dir.glob("probe_patch_*.pdf")) == []
+
+    def test_metadata_excluded_from_model_discovery(self, tmp_path):
+        """metadata.json must not be picked up as a per-patch model file."""
+        results_dir = tmp_path / "results"
+        figures_dir = tmp_path / "figures"
+        results_dir.mkdir()
+
+        _write_per_patch_json(str(results_dir), "my_model", ["slope"])
+        _write_metadata(str(results_dir), {"slope": {"type": "regression", "baseline": 0.0, "metric": "R²"}})
+
+        plot_probes_patch(str(results_dir), str(figures_dir))
+        assert (figures_dir / "probe_patch_slope.pdf").exists()
+        # Should not create a file for "metadata" as a model name
+        assert not (figures_dir / "probe_patch_features.pdf").exists()
