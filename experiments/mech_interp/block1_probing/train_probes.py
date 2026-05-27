@@ -38,8 +38,16 @@ PATCH_SIZE = 16
 CONTEXT_PATCHES = 32
 PRED_PATCHES = 4
 
-REGRESSION_FEATURES = ["slope", "log_noise_var", "phase_cos", "phase_sin"]
-CLASSIFICATION_FEATURES = ["period_idx"]
+REGRESSION_FEATURES = [
+    "slope", "log_noise_var", "phase_cos", "phase_sin",
+    "level_magnitude", "level_time_norm", "ar_phi",
+    "seasonal_amplitude", "log_sigma_ratio", "var_shift_time_norm",
+]
+CLASSIFICATION_FEATURES = [
+    "period_idx",
+    "spike_present", "rw_present",
+    # spike_patch_idx is 32-class; add when per-patch probing is wired in PR-8
+]
 RIDGE_ALPHAS = [0.01, 0.1, 1.0, 10.0, 100.0]
 
 

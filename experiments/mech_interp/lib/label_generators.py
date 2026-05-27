@@ -87,14 +87,36 @@ class NoiseVarLabelGenerator:
         return {"log_noise_var": np.float32(np.log(np.var(residuals) + 1e-8))}
 
 
-# To add custom label generators, implement the LabelGenerator protocol:
-#   class MyGenerator:
-#       def __call__(self, series: np.ndarray) -> dict[str, np.ndarray]: ...
-# Constructor kwargs should capture any hyperparameters.
+class AR1LabelGenerator:
+    """Estimate AR(1) coefficient phi via Yule-Walker lag-1 (Pearson correlation)."""
+
+    def __call__(self, series: np.ndarray) -> dict[str, np.ndarray]:
+        s = series.astype(np.float64)
+        phi = float(np.corrcoef(s[:-1], s[1:])[0, 1])
+        return {"ar_phi": np.float32(phi)}
+
+
+class LevelShiftLabelGenerator:
+    """Detect level shift change point via max absolute first-difference."""
+
+    def __call__(self, series: np.ndarray) -> dict[str, np.ndarray]:
+        s = series.astype(np.float64)
+        diffs = np.abs(np.diff(s))
+        t_shift = int(np.argmax(diffs)) + 1
+        magnitude = float(s[t_shift:].mean() - s[:t_shift].mean())
+        return {
+            "level_magnitude": np.float32(magnitude),
+            "level_time_norm": np.float32(t_shift / len(s)),
+        }
+
+
+# TODO: PR-10 — add VarianceShiftLabelGenerator, SpikeLabelGenerator, RWLabelGenerator
 
 
 DEFAULT_GENERATORS: list[LabelGenerator] = [
     TrendLabelGenerator(),
     SeasonalLabelGenerator(),
     NoiseVarLabelGenerator(),
+    AR1LabelGenerator(),
+    LevelShiftLabelGenerator(),
 ]
