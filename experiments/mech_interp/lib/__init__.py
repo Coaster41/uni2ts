@@ -1,5 +1,6 @@
 from .attn_extractor import AttentionExtractor
 from .batch_prep import make_batch
+from .corruption import corrupt_add_noise, corrupt_noise, corrupt_seasonal, corrupt_trend
 from .dataset import load_gift_eval_series, wrap_existing_dataset
 from .label_generators import (
     DEFAULT_GENERATORS,
@@ -8,6 +9,7 @@ from .label_generators import (
     SeasonalLabelGenerator,
     TrendLabelGenerator,
 )
+from .metrics import mase, scaled_weighted_quantile_loss, weighted_quantile_loss
 from .synthetic import generate_dataset, load_dataset, save_dataset
 
 __all__ = [
@@ -23,4 +25,11 @@ __all__ = [
     "DEFAULT_GENERATORS",
     "wrap_existing_dataset",
     "load_gift_eval_series",
+    "corrupt_trend",
+    "corrupt_seasonal",
+    "corrupt_noise",
+    "corrupt_add_noise",
+    "mase",
+    "weighted_quantile_loss",
+    "scaled_weighted_quantile_loss",
 ]
