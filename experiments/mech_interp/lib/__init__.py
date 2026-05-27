@@ -3,6 +3,7 @@ from .batch_prep import make_batch
 from .residual_extractor import ResidualExtractor
 from .corruption import corrupt_add_noise, corrupt_noise, corrupt_seasonal, corrupt_trend
 from .dataset import load_gift_eval_series, wrap_existing_dataset
+from .utils import _load_module
 from .label_generators import (
     AR1LabelGenerator,
     DEFAULT_GENERATORS,
@@ -62,4 +63,5 @@ __all__ = [
     "mase",
     "weighted_quantile_loss",
     "scaled_weighted_quantile_loss",
+    "_load_module"
 ]
