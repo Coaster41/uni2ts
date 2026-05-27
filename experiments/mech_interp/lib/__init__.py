@@ -1,5 +1,6 @@
 from .attn_extractor import AttentionExtractor
 from .batch_prep import make_batch
+from .residual_extractor import ResidualExtractor
 from .dataset import load_gift_eval_series, wrap_existing_dataset
 from .label_generators import (
     DEFAULT_GENERATORS,
@@ -23,4 +24,5 @@ __all__ = [
     "DEFAULT_GENERATORS",
     "wrap_existing_dataset",
     "load_gift_eval_series",
+    "ResidualExtractor",
 ]
