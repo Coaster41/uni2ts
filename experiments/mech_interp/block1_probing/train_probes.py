@@ -266,6 +266,21 @@ def main():
             json.dump(results_serializable, f, indent=2)
         print(f"  Saved to {out_path}")
 
+    # Write feature metadata for downstream plotting (baselines, metric labels)
+    metadata = {
+        "features": {
+            **{f: {"type": "regression", "baseline": 0.0, "metric": "R²"} for f in REGRESSION_FEATURES},
+            **{
+                f: {"type": "classification", "baseline": 1.0 / 8, "metric": "accuracy", "n_classes": 8}
+                for f in CLASSIFICATION_FEATURES
+            },
+        }
+    }
+    meta_path = os.path.join(args.output_dir, "metadata.json")
+    with open(meta_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    print(f"Metadata saved to {meta_path}")
+
 
 if __name__ == "__main__":
     main()
