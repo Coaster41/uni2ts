@@ -28,6 +28,7 @@ import torch
 from sklearn.linear_model import LogisticRegressionCV, RidgeCV
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from experiments.mech_interp.lib.utils import _load_module
 
 # Allow running as __main__ from the repo root.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -491,30 +492,6 @@ def _batched_ridge_predict(
     idx_exp = best_alpha_idx[None, :, None, :].expand(1, B, d, k)
     beta_best = beta_all.gather(0, idx_exp).squeeze(0)
     return torch.einsum("bnd,bdk->bnk", X_val_n, beta_best) + Y_mean[None]
-
-
-def _load_module(ckpt_path: str | None, model_name: str, device: str | torch.device = "cpu"):
-    """Load a model module from a checkpoint path, or build a tiny model if None."""
-    from uni2ts.model.moiraic.module import MoiraicModule
-    from uni2ts.model.moiraie.module import MoiraieModule
-
-    if ckpt_path is None:
-        print(f"  No checkpoint for {model_name} — using tiny in-memory model.")
-        tiny = dict(d_model=64, d_ff=128, num_layers=2, patch_size=PATCH_SIZE,
-                    max_seq_len=64, attn_dropout_p=0.0, dropout_p=0.0)
-        if model_name == "moiraie":
-            module = MoiraieModule(**tiny, num_predict_token=1)
-        else:
-            module = MoiraicModule(**tiny, num_predict_token=PRED_PATCHES)
-        return module.eval().to(device)
-
-    print(f"  Loading {model_name} from {ckpt_path} (device={device})")
-    if model_name == "moiraie":
-        module = MoiraieModule.from_pretrained(ckpt_path)
-    else:
-        module = MoiraicModule.from_pretrained(ckpt_path)
-
-    return module.eval().to(device)
 
 
 def main():
