@@ -24,6 +24,7 @@ from uni2ts.module.attention import (
     GroupedQueryAttention,
     MultiHeadAttention,
     MultiQueryAttention,
+    native_scaled_dot_product_attention,
 )
 
 
@@ -166,3 +167,79 @@ def test_mha(
     value = torch.randn(*(batch_shape + (kv_len, dim)))
 
     assert torch.eq(gqa(query, key, value), mha(query, key, value)).all()
+
+
+@pytest.mark.parametrize("batch_shape", [tuple(), (2,)])
+@pytest.mark.parametrize("num_heads,num_groups", [(1, 1), (8, 8), (8, 2), (8, 1)])
+@pytest.mark.parametrize("use_attn_mask", [False, True])
+def test_native_matches_builtin(
+    batch_shape: tuple[int, ...],
+    num_heads: int,
+    num_groups: int,
+    use_attn_mask: bool,
+    dim: int = 128,
+    q_len: int = 10,
+    kv_len: int = 12,
+):
+    """return_attn_weights=True (native softmax path) must produce identical output to
+    the default F.scaled_dot_product_attention path."""
+    torch.manual_seed(0)
+    attn = GroupedQueryAttention(
+        dim=dim,
+        num_heads=num_heads,
+        num_groups=num_groups,
+        bias=True,
+        norm_layer=None,
+        softmax_scale=None,
+        attn_dropout_p=0.0,  # must be 0 so both paths are deterministic
+    ).eval()
+
+    query = torch.randn(*(batch_shape + (q_len, dim)))
+    key = torch.randn(*(batch_shape + (kv_len, dim)))
+    value = torch.randn(*(batch_shape + (kv_len, dim)))
+    attn_mask = (
+        torch.ones(*(batch_shape + (q_len, kv_len)), dtype=torch.bool)
+        if use_attn_mask
+        else None
+    )
+
+    with torch.no_grad():
+        out_builtin = attn(query, key, value, attn_mask=attn_mask)
+        out_native, attn_weights = attn(
+            query, key, value, attn_mask=attn_mask, return_attn_weights=True
+        )
+
+    # Outputs must be numerically identical
+    assert torch.allclose(out_builtin, out_native, atol=1e-5), (
+        f"Max diff: {(out_builtin - out_native).abs().max().item()}"
+    )
+    # Weights must have correct shape
+    expected_weight_shape = batch_shape + (num_heads, q_len, kv_len)
+    assert attn_weights.shape == expected_weight_shape
+    # Weights must be non-negative (post-softmax)
+    assert (attn_weights >= 0).all()
+
+
+@pytest.mark.parametrize("use_attn_mask", [False, True])
+def test_native_sdpa_matches_builtin(use_attn_mask: bool):
+    """native_scaled_dot_product_attention must match F.scaled_dot_product_attention."""
+    import torch.nn.functional as F
+
+    torch.manual_seed(1)
+    # Shape: [batch, group, hpg, seq, head_dim]
+    q = torch.randn(2, 4, 2, 10, 16)
+    k = torch.randn(2, 4, 2, 12, 16)
+    v = torch.randn(2, 4, 2, 12, 16)
+    mask = (
+        torch.ones(2, 1, 1, 10, 12, dtype=torch.bool) if use_attn_mask else None
+    )
+
+    with torch.no_grad():
+        out_builtin = F.scaled_dot_product_attention(q, k, v, attn_mask=mask, dropout_p=0.0)
+        out_native, weights = native_scaled_dot_product_attention(
+            q, k, v, attn_mask=mask, dropout_p=0.0, return_attn_weights=True
+        )
+
+    assert torch.allclose(out_builtin, out_native, atol=1e-5), (
+        f"Max diff: {(out_builtin - out_native).abs().max().item()}"
+    )

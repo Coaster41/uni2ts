@@ -40,6 +40,7 @@ def native_scaled_dot_product_attention(
     ] = None,
     dropout_p: float = 0.0,
     scale: Optional[float] = None,
+    return_attn_weights: bool = False,
 ):
     scale_factor = 1 / math.sqrt(query.size(-1)) if scale is None else scale
     attn_weight = query @ key.transpose(-2, -1) * scale_factor
@@ -52,7 +53,10 @@ def native_scaled_dot_product_attention(
         attn_weight = attn_weight + attn_bias
     attn_weight = torch.softmax(attn_weight, dim=-1)
     attn_weight = torch.dropout(attn_weight, dropout_p, train=True)
-    return attn_weight @ value
+    result = attn_weight @ value
+    if return_attn_weights:
+        return result, attn_weight
+    return result
 
 
 class GroupedQueryAttention(nn.Module):
@@ -247,6 +251,7 @@ class GroupedQueryAttention(nn.Module):
         past_kv_var_id: Optional[Int[torch.Tensor, "*batch cached_len"]] = None,
         past_kv_time_id: Optional[Int[torch.Tensor, "*batch cached_len"]] = None,
         return_kv: bool = False,
+        return_attn_weights: bool = False,
     ) -> Float[torch.Tensor, "*batch q_len dim"]:
         # 1) Project NEW tokens (Q always; K, V for the new-kv segment only)
         query = self.q_proj(query)
@@ -342,19 +347,38 @@ class GroupedQueryAttention(nn.Module):
         )
 
         # 8) Attend.
-        out = F.scaled_dot_product_attention(
-            query,
-            k,
-            v,
-            attn_mask=attn_mask,
-            dropout_p=self.attn_dropout_p,
-            scale=self.softmax_scale,
-        )
+        if return_attn_weights:
+            out, attn_weight = native_scaled_dot_product_attention(
+                query,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=self.attn_dropout_p,
+                scale=self.softmax_scale,
+                return_attn_weights=True,
+            )
+            # [*batch, group, hpg, q_len, kv_len] -> [*batch, num_heads, q_len, kv_len]
+            attn_weight = rearrange(
+                attn_weight, "... group hpg q_len kv_len -> ... (group hpg) q_len kv_len"
+            )
+        else:
+            out = F.scaled_dot_product_attention(
+                query,
+                k,
+                v,
+                attn_mask=attn_mask,
+                dropout_p=self.attn_dropout_p,
+                scale=self.softmax_scale,
+            )
         out = rearrange(out, "... group hpg q_len dim -> ... q_len (group hpg dim)")
         out = self.out_proj(out)
 
-        if return_kv:
+        if return_kv and return_attn_weights:
+            return out, updated_kv, attn_weight
+        elif return_kv:
             return out, updated_kv
+        elif return_attn_weights:
+            return out, attn_weight
         return out
 
 

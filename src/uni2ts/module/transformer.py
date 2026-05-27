@@ -58,6 +58,7 @@ class TransformerEncoderLayer(nn.Module):
         past_kv_var_id: Optional[torch.Tensor] = None,
         past_kv_time_id: Optional[torch.Tensor] = None,
         return_kv: bool = False,
+        return_attn_weights: bool = False,
     ):
         sa_kwargs = dict(
             attn_mask=attn_mask,
@@ -67,20 +68,38 @@ class TransformerEncoderLayer(nn.Module):
             past_kv_var_id=past_kv_var_id,
             past_kv_time_id=past_kv_time_id,
             return_kv=return_kv,
+            return_attn_weights=return_attn_weights,
         )
         if self.pre_norm:
             sa_out = self._sa_block(self.norm1(x), **sa_kwargs)
-            sa, updated_kv = (sa_out if return_kv else (sa_out, None))
+        else:
+            sa_out = self._sa_block(x, **sa_kwargs)
+
+        if return_kv and return_attn_weights:
+            sa, updated_kv, attn_w = sa_out
+        elif return_kv:
+            sa, updated_kv = sa_out
+            attn_w = None
+        elif return_attn_weights:
+            sa, attn_w = sa_out
+            updated_kv = None
+        else:
+            sa = sa_out
+            updated_kv = attn_w = None
+
+        if self.pre_norm:
             x = x + sa
             x = x + self.ffn(self.norm2(x), centroid=centroid)
         else:
-            sa_out = self._sa_block(x, **sa_kwargs)
-            sa, updated_kv = (sa_out if return_kv else (sa_out, None))
             x = self.norm1(x + sa)
             x = self.norm2(x + self.ffn(x, centroid=centroid))
 
-        if return_kv:
+        if return_kv and return_attn_weights:
+            return x, updated_kv, attn_w
+        elif return_kv:
             return x, updated_kv
+        elif return_attn_weights:
+            return x, attn_w
         return x
 
     def _sa_block(
@@ -93,6 +112,7 @@ class TransformerEncoderLayer(nn.Module):
         past_kv_var_id=None,
         past_kv_time_id=None,
         return_kv=False,
+        return_attn_weights=False,
     ):
         out = self.self_attn(
             x, x, x,
@@ -103,10 +123,17 @@ class TransformerEncoderLayer(nn.Module):
             past_kv_var_id=past_kv_var_id,
             past_kv_time_id=past_kv_time_id,
             return_kv=return_kv,
+            return_attn_weights=return_attn_weights,
         )
-        if return_kv:
+        if return_kv and return_attn_weights:
+            attn_out, updated_kv, attn_w = out
+            return self.dropout(attn_out), updated_kv, attn_w
+        elif return_kv:
             attn_out, updated_kv = out
             return self.dropout(attn_out), updated_kv
+        elif return_attn_weights:
+            attn_out, attn_w = out
+            return self.dropout(attn_out), attn_w
         return self.dropout(out)
 
 
@@ -246,8 +273,10 @@ class TransformerEncoder(nn.Module):
         past_kv_var_id: Optional[torch.Tensor] = None,
         past_kv_time_id: Optional[torch.Tensor] = None,
         return_kvs: bool = False,
+        return_attn_weights: bool = False,
     ):
         updated_kvs = [] if return_kvs else None
+        all_attn_weights = [] if return_attn_weights else None
         for idx, layer in enumerate(self.layers):
             pkv = past_kvs[idx] if past_kvs is not None else None
             common = dict(
@@ -258,18 +287,30 @@ class TransformerEncoder(nn.Module):
                 past_kv_var_id=past_kv_var_id,
                 past_kv_time_id=past_kv_time_id,
                 return_kv=return_kvs,
+                return_attn_weights=return_attn_weights,
             )
             if self.use_moe:
                 out = layer(x, centroid=self.centroid[idx], **common)
             else:
                 out = layer(x, **common)
-            if return_kvs:
+            if return_kvs and return_attn_weights:
+                x, ukv, layer_attn = out
+                updated_kvs.append(ukv)
+                all_attn_weights.append(layer_attn)
+            elif return_kvs:
                 x, ukv = out
                 updated_kvs.append(ukv)
+            elif return_attn_weights:
+                x, layer_attn = out
+                all_attn_weights.append(layer_attn)
             else:
                 x = out
 
         x = self.norm(x)
-        if return_kvs:
+        if return_kvs and return_attn_weights:
+            return x, updated_kvs, all_attn_weights
+        elif return_kvs:
             return x, updated_kvs
+        elif return_attn_weights:
+            return x, all_attn_weights
         return x

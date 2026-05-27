@@ -124,6 +124,7 @@ class MoiraicModule(
         training_mode: Bool = True,
         past_cache: Optional[dict] = None,
         return_cache: bool = False,
+        return_attn_weights: bool = False,
     ):
         """
         Defines the forward pass of MoiraiDecoderModule.
@@ -167,6 +168,11 @@ class MoiraicModule(
                     reprs, attn_mask, time_id=time_id, var_id=variate_id,
                     return_kvs=True,
                 )
+            elif return_attn_weights:
+                reprs, all_attn_weights = self.encoder(
+                    reprs, attn_mask, time_id=time_id, var_id=variate_id,
+                    return_attn_weights=True,
+                )
             else:
                 reprs = self.encoder(
                     reprs, attn_mask, time_id=time_id, var_id=variate_id,
@@ -193,6 +199,8 @@ class MoiraicModule(
                     scale=scale,
                 )
                 return result, cache
+            if return_attn_weights:
+                return result, all_attn_weights
             return result
 
         # ----------------------------------------------------------------------

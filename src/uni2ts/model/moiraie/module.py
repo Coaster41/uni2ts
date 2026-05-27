@@ -126,6 +126,7 @@ class MoiraieModule(
         variate_id: Int[torch.Tensor, "*batch seq_len"],
         prediction_mask: Bool[torch.Tensor, "*batch seq_len"],
         training_mode: Bool = True,
+        return_attn_weights: bool = False,
     ):
         """
         Defines the forward pass of MoiraieecoderModule.
@@ -161,17 +162,30 @@ class MoiraieModule(
 
         masked_reprs = mask_fill(reprs, prediction_mask, self.mask_encoding.weight)
 
-        reprs = self.encoder(
-            masked_reprs,
-            packed_attention_mask(sample_id),
-            time_id=time_id,
-            var_id=variate_id,
-        )
+        if return_attn_weights:
+            reprs, all_attn_weights = self.encoder(
+                masked_reprs,
+                packed_attention_mask(sample_id),
+                time_id=time_id,
+                var_id=variate_id,
+                return_attn_weights=True,
+            )
+        else:
+            reprs = self.encoder(
+                masked_reprs,
+                packed_attention_mask(sample_id),
+                time_id=time_id,
+                var_id=variate_id,
+            )
         if self.get_reprs:
             preds = self.out_proj(reprs)
-            return (reprs, torch.cat((loc, scale), dim=-1))
-        preds = self.out_proj(reprs)
-        if training_mode:
-            return preds, scaled_target
+            result = (reprs, torch.cat((loc, scale), dim=-1))
         else:
-            return preds * scale + loc
+            preds = self.out_proj(reprs)
+            if training_mode:
+                result = (preds, scaled_target)
+            else:
+                result = preds * scale + loc
+        if return_attn_weights:
+            return result, all_attn_weights
+        return result
