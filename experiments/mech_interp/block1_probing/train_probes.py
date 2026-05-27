@@ -32,7 +32,7 @@ from sklearn.preprocessing import StandardScaler
 # Allow running as __main__ from the repo root.
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
-from experiments.mech_interp.lib import ResidualExtractor, generate_dataset, load_dataset, make_batch
+from experiments.mech_interp.lib import ResidualExtractor, generate_composite_dataset, generate_dataset, load_dataset, make_batch
 
 PATCH_SIZE = 16
 CONTEXT_PATCHES = 32
@@ -43,10 +43,10 @@ REGRESSION_FEATURES = [
     "level_magnitude", "level_time_norm", "ar_phi",
     "seasonal_amplitude", "log_sigma_ratio", "var_shift_time_norm",
 ]
+BINARY_FEATURES = ["spike_present", "rw_present"]
 CLASSIFICATION_FEATURES = [
     "period_idx",
-    "spike_present", "rw_present",
-    # spike_patch_idx is 32-class; add when per-patch probing is wired in PR-8
+    "spike_patch_idx",   # 32-class per-patch; handled in run_probes_per_patch only
 ]
 RIDGE_ALPHAS = [0.01, 0.1, 1.0, 10.0, 100.0]
 
@@ -127,6 +127,14 @@ def fit_probe(
         probe = Pipeline([("scaler", StandardScaler()), ("ridge", RidgeCV(alphas=RIDGE_ALPHAS, cv=5))])
         probe.fit(X_train, y_train)
         return float(probe.score(X_val, y_val))
+    elif feature_type == "binary":
+        from sklearn.metrics import roc_auc_score
+
+        clf = Pipeline([("scaler", StandardScaler()),
+                        ("clf", LogisticRegressionCV(cv=5, max_iter=5000, n_jobs=-1))])
+        clf.fit(X_train, y_train.astype(int))
+        proba = clf.predict_proba(X_val)[:, 1]
+        return float(roc_auc_score(y_val.astype(int), proba))
     elif feature_type == "classification":
         from sklearn.linear_model import LogisticRegression
 
@@ -148,7 +156,7 @@ def fit_probe(
         probe.fit(X_train, y_train_int)
         return float(probe.score(X_val, y_val_int))
     else:
-        raise ValueError(f"Unknown feature_type {feature_type!r}; expected 'regression' or 'classification'")
+        raise ValueError(f"Unknown feature_type {feature_type!r}; expected 'regression', 'binary', or 'classification'")
 
 
 def run_probes_for_model(
@@ -180,6 +188,7 @@ def run_probes_for_model(
     series = dataset["series"]
     all_features = (
         [(f, "regression") for f in REGRESSION_FEATURES if f in dataset]
+        + [(f, "binary")       for f in BINARY_FEATURES       if f in dataset]
         + [(f, "classification") for f in CLASSIFICATION_FEATURES if f in dataset]
     )
 
@@ -206,9 +215,26 @@ def run_probes_for_model(
         for feature, ftype in all_features:
             y_train = dataset[feature][train_idx].ravel()
             y_val = dataset[feature][val_idx].ravel()
+
+            # Compute valid-row masks once per feature (same across all layers)
+            if np.issubdtype(y_train.dtype, np.floating):
+                tr_mask = np.isfinite(y_train)
+                va_mask = np.isfinite(y_val)
+            elif feature == "period_idx":
+                tr_mask = y_train >= 0
+                va_mask = y_val >= 0
+            else:
+                tr_mask = np.ones(len(y_train), dtype=bool)
+                va_mask = np.ones(len(y_val), dtype=bool)
+
+            if tr_mask.sum() < 10 or va_mask.sum() < 10:
+                continue
+
             layer_scores: dict[int, float] = {}
             for layer_idx in layer_keys:
-                score = fit_probe(X_train_by_layer[layer_idx], X_val_by_layer[layer_idx], y_train, y_val, ftype)
+                X_tr = X_train_by_layer[layer_idx][tr_mask]
+                X_va = X_val_by_layer[layer_idx][va_mask]
+                score = fit_probe(X_tr, X_va, y_train[tr_mask], y_val[va_mask], ftype)
                 layer_scores[layer_idx] = score
             pooling_results[feature] = layer_scores
             best = max(layer_scores.values())
@@ -312,7 +338,9 @@ def run_probes_per_patch(
     clf_features = [f for f in CLASSIFICATION_FEATURES if f in dataset]
 
     # Regression: stack all regression labels into Y [n, k] and solve jointly
-    results: dict[str, dict[int, dict[int, float]]] = {f: {} for f in reg_features + clf_features}
+    # (clf_label_sets populated below; results initialized after to exclude skipped clf features)
+    clf_label_sets: dict = {}
+    results: dict[str, dict[int, dict[int, float]]] = {f: {} for f in reg_features}
 
     if reg_features:
         Y_train_reg = torch.from_numpy(
@@ -325,16 +353,35 @@ def run_probes_per_patch(
     # One-vs-rest encoding for classification
     if clf_features:
         # We handle each classification feature independently (usually just period_idx)
-        clf_label_sets = {}
         for feat in clf_features:
-            labels_train = dataset[feat][train_idx].ravel().astype(int)
-            labels_val = dataset[feat][val_idx].ravel().astype(int)
-            n_classes = int(labels_train.max()) + 1
-            Y_onehot_train = torch.zeros(len(train_idx), n_classes)
-            Y_onehot_train[torch.arange(len(train_idx)), labels_train] = 1.0
-            Y_onehot_val = torch.zeros(len(val_idx), n_classes)
-            Y_onehot_val[torch.arange(len(val_idx)), labels_val] = 1.0
-            clf_label_sets[feat] = (labels_val, Y_onehot_train, Y_onehot_val)
+            if feat == "spike_patch_idx":
+                # Binary per-patch probe: is this the spike patch?
+                # Mask out rows with no spike (spike_patch_idx == -1)
+                spike_arr = dataset[feat]
+                mask_tr = spike_arr[train_idx] >= 0  # [n_train] bool
+                mask_va = spike_arr[val_idx] >= 0    # [n_val] bool
+                n_sp_tr = int(mask_tr.sum())
+                n_sp_va = int(mask_va.sum())
+                if n_sp_tr < 2 or n_sp_va < 2:
+                    continue
+                labels_tr_sp = spike_arr[train_idx][mask_tr].astype(int)
+                labels_va_sp = spike_arr[val_idx][mask_va].astype(int)
+                Y_oh_tr_sp = torch.zeros(n_sp_tr, context_patches)
+                Y_oh_tr_sp[torch.arange(n_sp_tr), labels_tr_sp] = 1.0
+                clf_label_sets[feat] = ("spike", mask_tr, mask_va, labels_va_sp, Y_oh_tr_sp)
+            else:
+                labels_train = dataset[feat][train_idx].ravel().astype(int)
+                labels_val = dataset[feat][val_idx].ravel().astype(int)
+                n_classes = int(labels_train.max()) + 1
+                Y_onehot_train = torch.zeros(len(train_idx), n_classes)
+                Y_onehot_train[torch.arange(len(train_idx)), labels_train] = 1.0
+                Y_onehot_val = torch.zeros(len(val_idx), n_classes)
+                Y_onehot_val[torch.arange(len(val_idx)), labels_val] = 1.0
+                clf_label_sets[feat] = ("standard", labels_val, Y_onehot_train, Y_onehot_val)
+
+    # Initialize results for clf features that were not skipped
+    for feat in clf_label_sets:
+        results[feat] = {}
 
     for layer_idx in layer_keys:
         # Stack patch positions along batch dim: [B=context_patches, n, d]
@@ -354,17 +401,38 @@ def run_probes_per_patch(
                 results[feat][layer_idx] = {p: float(r2[p, ki]) for p in range(B)}
 
         # Classification probe (one-vs-rest ridge)
-        for feat in clf_features:
-            labels_val, Y_oh_train, Y_oh_val = clf_label_sets[feat]
-            with torch.no_grad():
-                # r2 shape [B, n_classes] — use argmax on raw logits instead
-                y_val_scores = _batched_ridge_predict(X_tr, X_va, Y_oh_train)  # [B, n_val, n_classes]
-            preds = y_val_scores.argmax(dim=2).numpy()  # [B, n_val]
-            acc_per_patch = (preds == labels_val[None, :]).mean(axis=1)  # [B]
-            results[feat][layer_idx] = {p: float(acc_per_patch[p]) for p in range(B)}
+        for feat, entry in clf_label_sets.items():
+            kind = entry[0]
+            if kind == "spike":
+                _, mask_tr_sp, mask_va_sp, labels_va_sp, Y_oh_tr_sp = entry
+                X_tr_sp = X_tr[:, mask_tr_sp, :]   # [B, n_sp_tr, d]
+                X_va_sp = X_va[:, mask_va_sp, :]   # [B, n_sp_va, d]
+                with torch.no_grad():
+                    y_scores = _batched_ridge_predict(X_tr_sp, X_va_sp, Y_oh_tr_sp).numpy()  # [B, n_sp_va, 32]
+                from sklearn.metrics import roc_auc_score
+                auroc = np.zeros(B)
+                for p in range(B):
+                    binary_tgt = (labels_va_sp == p).astype(int)
+                    pos = int(binary_tgt.sum())
+                    if pos < 1 or pos == len(binary_tgt):
+                        auroc[p] = 0.5
+                    else:
+                        try:
+                            auroc[p] = float(roc_auc_score(binary_tgt, y_scores[p, :, p]))
+                        except Exception:
+                            auroc[p] = 0.5
+                results[feat][layer_idx] = {p: float(auroc[p]) for p in range(B)}
+            else:
+                _, labels_val, Y_oh_train, Y_oh_val = entry
+                with torch.no_grad():
+                    y_val_scores = _batched_ridge_predict(X_tr, X_va, Y_oh_train)  # [B, n_val, n_classes]
+                preds = y_val_scores.argmax(dim=2).numpy()  # [B, n_val]
+                acc_per_patch = (preds == labels_val[None, :]).mean(axis=1)  # [B]
+                results[feat][layer_idx] = {p: float(acc_per_patch[p]) for p in range(B)}
 
+        active_clf = list(clf_label_sets.keys())
         best_reg = {f: max(results[f][layer_idx].values()) for f in reg_features} if reg_features else {}
-        best_clf = {f: max(results[f][layer_idx].values()) for f in clf_features} if clf_features else {}
+        best_clf = {f: max(results[f][layer_idx].values()) for f in active_clf} if active_clf else {}
         print(f"    Layer {layer_idx}: best patch scores — " +
               ", ".join(f"{f}={v:.3f}" for f, v in {**best_reg, **best_clf}.items()))
 
@@ -454,7 +522,7 @@ def main():
     parser.add_argument("--moiraie-ckpt", default=None, help="Path to moiraie checkpoint (.ckpt or hub id)")
     parser.add_argument("--moiraic-ckpt", default=None, help="Path to moiraic checkpoint (.ckpt or hub id)")
     parser.add_argument("--dataset-path", default=None, help="Path to .npz dataset (generated in memory if omitted)")
-    parser.add_argument("--output-dir", default="experiments/mech_interp/block1_probing/results",
+    parser.add_argument("--output-dir", default="experiments/mech_interp/block1_probing/results/synthetic",
                         help="Directory for results JSON files")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--seed", type=int, default=42, help="RNG seed for train/val split")
@@ -471,8 +539,8 @@ def main():
         print(f"Loading dataset from {args.dataset_path}")
         dataset = load_dataset(args.dataset_path)
     else:
-        print("Generating synthetic dataset (n=1000, seed=42) in memory...")
-        dataset = generate_dataset(n=1000, seed=42)
+        print("Generating composite synthetic dataset (n=5000, seed=42) in memory...")
+        dataset = generate_composite_dataset(n=5000, seed=42)
 
     n = len(dataset["series"])
     rng = np.random.default_rng(args.seed)
@@ -526,13 +594,20 @@ def main():
             print(f"  Saved to {pp_path}")
 
     # Write feature metadata for downstream plotting (baselines, metric labels)
+    clf_meta = {
+        "period_idx":      {"n_classes": 8,  "baseline": 1 / 8,  "metric": "accuracy"},
+        "spike_patch_idx": {"n_classes": 32, "baseline": 1 / 32, "metric": "accuracy"},
+    }
+    bin_meta = {
+        "spike_present": {"metric": "AUROC", "baseline": 0.5},
+        "rw_present":    {"metric": "AUROC", "baseline": 0.5},
+    }
     metadata = {
         "features": {
             **{f: {"type": "regression", "baseline": 0.0, "metric": "R²"} for f in REGRESSION_FEATURES},
-            **{
-                f: {"type": "classification", "baseline": 1.0 / 8, "metric": "accuracy", "n_classes": 8}
-                for f in CLASSIFICATION_FEATURES
-            },
+            **{f: {"type": "binary",         **bin_meta[f]}  for f in BINARY_FEATURES},
+            **{f: {"type": "classification", **clf_meta.get(f, {"n_classes": 2, "baseline": 0.5, "metric": "accuracy"})}
+               for f in CLASSIFICATION_FEATURES},
         }
     }
     meta_path = os.path.join(args.output_dir, "metadata.json")

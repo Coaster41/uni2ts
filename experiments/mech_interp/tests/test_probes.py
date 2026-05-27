@@ -16,6 +16,7 @@ from experiments.mech_interp.lib import (
 )
 from experiments.mech_interp.lib.synthetic import generate_composite_dataset
 from experiments.mech_interp.block1_probing.train_probes import (
+    BINARY_FEATURES,
     CLASSIFICATION_FEATURES,
     CONTEXT_PATCHES,
     PATCH_SIZE,
@@ -152,7 +153,7 @@ def test_run_probes_for_model_structure(module_e, tiny_dataset):
     assert set(results.keys()) == {"mean_ctx", "last_ctx"}, (
         f"Expected pooling modes, got {set(results.keys())}"
     )
-    all_known_features = set(REGRESSION_FEATURES) | set(CLASSIFICATION_FEATURES)
+    all_known_features = set(REGRESSION_FEATURES) | set(BINARY_FEATURES) | set(CLASSIFICATION_FEATURES)
     expected_layers = {-1} | set(range(_TINY["num_layers"]))
     for pooling, feat_dict in results.items():
         # result only contains features that exist in the dataset (a subset of all known)
@@ -174,7 +175,7 @@ def test_run_probes_for_model_moiraic(module_c, tiny_dataset):
     idx = np.arange(n)
     results = run_probes_for_model(module_c, tiny_dataset, idx[:80], idx[80:], batch_size=8)
     assert set(results.keys()) == {"mean_ctx", "last_ctx"}
-    all_known_features = set(REGRESSION_FEATURES) | set(CLASSIFICATION_FEATURES)
+    all_known_features = set(REGRESSION_FEATURES) | set(BINARY_FEATURES) | set(CLASSIFICATION_FEATURES)
     for pooling_dict in results.values():
         assert set(pooling_dict.keys()) <= all_known_features
         assert len(pooling_dict) > 0
@@ -316,7 +317,7 @@ def test_run_probes_per_patch_structure(module_e, tiny_dataset):
     idx = np.arange(n)
     results = run_probes_per_patch(module_e, tiny_dataset, idx[:80], idx[80:], batch_size=8)
 
-    all_known_features = set(REGRESSION_FEATURES) | set(CLASSIFICATION_FEATURES)
+    all_known_features = set(REGRESSION_FEATURES) | set(BINARY_FEATURES) | set(CLASSIFICATION_FEATURES)
     assert set(results.keys()) <= all_known_features
     assert len(results) > 0
 
@@ -336,7 +337,7 @@ def test_run_probes_per_patch_moiraic(module_c, tiny_dataset):
     n = len(tiny_dataset["series"])
     idx = np.arange(n)
     results = run_probes_per_patch(module_c, tiny_dataset, idx[:80], idx[80:], batch_size=8)
-    all_known_features = set(REGRESSION_FEATURES) | set(CLASSIFICATION_FEATURES)
+    all_known_features = set(REGRESSION_FEATURES) | set(BINARY_FEATURES) | set(CLASSIFICATION_FEATURES)
     assert set(results.keys()) <= all_known_features
     assert len(results) > 0
     expected_layers = {-1} | set(range(_TINY["num_layers"]))
@@ -402,3 +403,71 @@ def test_mean_ctx_and_last_ctx_shapes(module_e, series):
         assert last_acts[layer_idx].shape == (N, _TINY["d_model"]), (
             f"last_ctx layer {layer_idx}: expected ({N}, {_TINY['d_model']}), got {last_acts[layer_idx].shape}"
         )
+
+
+# ---------------------------------------------------------------------------
+# PR-8: composite dataset, NaN masking, binary AUROC, spike_patch_idx
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def composite_dataset():
+    return generate_composite_dataset(n=200, seed=0)
+
+
+def test_nan_masking_no_crash(module_e, composite_dataset):
+    """run_probes_for_model completes without error on composite dataset; regression features present."""
+    n = len(composite_dataset["series"])
+    idx = np.arange(n)
+    results = run_probes_for_model(module_e, composite_dataset, idx[:160], idx[160:], batch_size=8)
+
+    assert set(results.keys()) == {"mean_ctx", "last_ctx"}
+    present_reg = [f for f in REGRESSION_FEATURES if f in composite_dataset]
+    for pooling, feat_dict in results.items():
+        for feat in present_reg:
+            assert feat in feat_dict, f"[{pooling}] regression feature {feat!r} missing from results"
+
+
+def test_binary_features_use_auroc(rng):
+    """fit_probe with feature_type='binary' returns a value in [0, 1]."""
+    X_train = rng.standard_normal((80, 64)).astype(np.float32)
+    X_val = rng.standard_normal((20, 64)).astype(np.float32)
+    y_train = rng.integers(0, 2, size=80).astype(np.float32)
+    y_val = rng.integers(0, 2, size=20).astype(np.float32)
+    score = fit_probe(X_train, X_val, y_train, y_val, "binary")
+    assert isinstance(score, float)
+    assert 0.0 <= score <= 1.0
+
+
+def test_conditional_feature_scores_not_nan(module_e, composite_dataset):
+    """Conditional features (ar_phi, level_magnitude, log_sigma_ratio) return finite scores."""
+    conditional = ["ar_phi", "level_magnitude", "log_sigma_ratio"]
+    n = len(composite_dataset["series"])
+    idx = np.arange(n)
+    results = run_probes_for_model(module_e, composite_dataset, idx[:160], idx[160:], batch_size=8)
+
+    for pooling, feat_dict in results.items():
+        for feat in conditional:
+            if feat not in composite_dataset:
+                continue
+            assert feat in feat_dict, f"[{pooling}] {feat} missing despite being in dataset"
+            for layer_idx, score in feat_dict[feat].items():
+                assert math.isfinite(score), f"[{pooling}] {feat} layer {layer_idx}: score={score} is not finite"
+
+
+def test_spike_patch_idx_per_patch(module_e, composite_dataset):
+    """run_probes_per_patch returns spike_patch_idx key with finite patch scores."""
+    if "spike_patch_idx" not in composite_dataset:
+        pytest.skip("composite_dataset missing spike_patch_idx")
+    n = len(composite_dataset["series"])
+    idx = np.arange(n)
+    results = run_probes_per_patch(module_e, composite_dataset, idx[:160], idx[160:], batch_size=8)
+
+    assert "spike_patch_idx" in results, "spike_patch_idx missing from per-patch results"
+    layer_dict = results["spike_patch_idx"]
+    expected_layers = {-1} | set(range(_TINY["num_layers"]))
+    assert set(layer_dict.keys()) == expected_layers
+    for layer_idx, patch_dict in layer_dict.items():
+        assert len(patch_dict) == CONTEXT_PATCHES
+        for patch_idx, score in patch_dict.items():
+            assert isinstance(score, float)
+            assert math.isfinite(score), f"spike_patch_idx L{layer_idx} P{patch_idx}: score={score}"
