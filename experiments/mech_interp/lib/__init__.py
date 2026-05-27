@@ -3,6 +3,7 @@ from .batch_prep import make_batch
 from .residual_extractor import ResidualExtractor
 from .corruption import corrupt_add_noise, corrupt_noise, corrupt_seasonal, corrupt_trend
 from .dataset import load_gift_eval_series, wrap_existing_dataset
+from .real_data import load_gift_subset
 from .utils import _load_module
 from .label_generators import (
     AR1LabelGenerator,
@@ -55,6 +56,7 @@ __all__ = [
     "DEFAULT_GENERATORS",
     "wrap_existing_dataset",
     "load_gift_eval_series",
+    "load_gift_subset",
     "ResidualExtractor",
     "corrupt_trend",
     "corrupt_seasonal",

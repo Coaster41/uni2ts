@@ -174,3 +174,4 @@ CLAUDE.md
 HANDOFF*
 experiments/mech_interp/block1_probing/figures
 experiments/mech_interp/block1_probing/results
+experiments/mech_interp/.cache/

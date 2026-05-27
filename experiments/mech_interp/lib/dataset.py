@@ -52,9 +52,24 @@ def wrap_existing_dataset(
     generator output. Raises ValueError if not enough valid windows exist.
     """
     all_series = [np.asarray(s, dtype=np.float32) for s in series_source]
-    eligible = [s for s in all_series if len(s) >= series_length and not np.any(np.isnan(s))]
 
-    n_windows = np.array([len(s) - series_length + 1 for s in eligible], dtype=np.float64)
+    # Precompute valid (NaN-free) window start positions for each series.
+    # This allows NaN-containing series to still contribute non-NaN windows.
+    eligible: list[np.ndarray] = []
+    valid_starts_per_series: list[np.ndarray] = []
+    for s in all_series:
+        if len(s) < series_length:
+            continue
+        is_nan = np.isnan(s).astype(np.int32)
+        cum = np.concatenate([[0], np.cumsum(is_nan)])
+        n_possible = len(s) - series_length + 1
+        nan_in_window = cum[series_length:] - cum[:n_possible]
+        starts = np.where(nan_in_window == 0)[0]
+        if len(starts) > 0:
+            eligible.append(s)
+            valid_starts_per_series.append(starts)
+
+    n_windows = np.array([len(vs) for vs in valid_starts_per_series], dtype=np.float64)
     total_windows = int(n_windows.sum())
     if total_windows < n:
         raise ValueError(
@@ -70,8 +85,8 @@ def wrap_existing_dataset(
     labels: dict[str, list] = defaultdict(list)
     for si in series_idxs:
         s = eligible[si]
-        max_start = len(s) - series_length
-        start = int(rng.integers(0, max_start + 1))
+        valid_starts = valid_starts_per_series[si]
+        start = int(valid_starts[rng.integers(0, len(valid_starts))])
         window = s[start : start + series_length]
         windows.append(window)
         for gen in label_generators:
