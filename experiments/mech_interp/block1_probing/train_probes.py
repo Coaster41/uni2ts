@@ -59,20 +59,26 @@ def extract_activations(
     context_patches: int = CONTEXT_PATCHES,
     pred_patches: int = PRED_PATCHES,
     device: str | torch.device = "cpu",
+    pooling: str = "mean_ctx",
 ) -> dict[int, np.ndarray]:
     """
-    Extract mean-pooled context activations for all examples.
+    Extract pooled context activations for all examples.
 
     Parameters
     ----------
     module : MoiraieModule or MoiraicModule
     series : float32 [n, time]
     batch_size : int
+    pooling : "mean_ctx" | "last_ctx" | "per_patch"
+        "mean_ctx": mean over all context patches → [n, d_model]
+        "last_ctx": last context patch (position context_patches-1) → [n, d_model]
+        "per_patch": no pooling, preserves patch axis → [n, context_patches, d_model]
 
     Returns
     -------
-    dict layer_idx -> float32 [n, d_model]
-        Mean-pooled over context patches (positions 0..context_patches-1).
+    dict layer_idx -> float32 array
+        Shape [n, d_model] for "mean_ctx"/"last_ctx", [n, context_patches, d_model] for "per_patch".
+        Includes key -1 for the post-projection, pre-attention (in_proj) activation.
     """
     module.eval()
     accumulated: dict[int, list[np.ndarray]] = {}
@@ -83,9 +89,16 @@ def extract_activations(
             batch = make_batch(chunk, patch_size=patch_size, context_patches=context_patches, pred_patches=pred_patches, device=device)
             acts = extractor.run(batch)  # dict[int, Tensor[chunk, n_patches, d_model]]
             for layer_idx, tensor in acts.items():
-                # Mean-pool context patches: positions 0..context_patches-1
-                ctx = tensor[:, :context_patches, :].mean(dim=1).numpy()  # [chunk, d_model]
-                accumulated.setdefault(layer_idx, []).append(ctx)
+                ctx_acts = tensor[:, :context_patches, :]   # [chunk, context_patches, d_model]
+                if pooling == "mean_ctx":
+                    pooled = ctx_acts.mean(dim=1).numpy()   # [chunk, d_model]
+                elif pooling == "last_ctx":
+                    pooled = ctx_acts[:, -1, :].numpy()     # [chunk, d_model] — position context_patches-1
+                elif pooling == "per_patch":
+                    pooled = ctx_acts.numpy()               # [chunk, context_patches, d_model]
+                else:
+                    raise ValueError(f"Unknown pooling {pooling!r}; expected 'mean_ctx', 'last_ctx', or 'per_patch'")
+                accumulated.setdefault(layer_idx, []).append(pooled)
 
     return {layer_idx: np.concatenate(chunks, axis=0) for layer_idx, chunks in accumulated.items()}
 
@@ -148,9 +161,9 @@ def run_probes_for_model(
     context_patches: int = CONTEXT_PATCHES,
     pred_patches: int = PRED_PATCHES,
     device: str | torch.device = "cpu",
-) -> dict[str, dict[int, float]]:
+) -> dict[str, dict[str, dict[int, float]]]:
     """
-    Full probe training pipeline for one model.
+    Full probe training pipeline for one model, run under both pooling modes.
 
     Parameters
     ----------
@@ -160,42 +173,48 @@ def run_probes_for_model(
 
     Returns
     -------
-    {feature_name: {layer_idx: score}}
+    {pooling_mode: {feature_name: {layer_idx: score}}}
+        pooling_mode ∈ {"mean_ctx", "last_ctx"}
+        layer_idx includes -1 (post-projection, pre-attention baseline)
     """
     series = dataset["series"]
-
-    print(f"  Extracting train activations ({len(train_idx)} examples)...")
-    X_train_by_layer = extract_activations(
-        module, series[train_idx], batch_size=batch_size,
-        patch_size=patch_size, context_patches=context_patches, pred_patches=pred_patches,
-        device=device,
-    )
-
-    print(f"  Extracting val activations ({len(val_idx)} examples)...")
-    X_val_by_layer = extract_activations(
-        module, series[val_idx], batch_size=batch_size,
-        patch_size=patch_size, context_patches=context_patches, pred_patches=pred_patches,
-        device=device,
-    )
-
-    num_layers = len(X_train_by_layer)
-    results: dict[str, dict[int, float]] = {}
-
     all_features = (
         [(f, "regression") for f in REGRESSION_FEATURES if f in dataset]
         + [(f, "classification") for f in CLASSIFICATION_FEATURES if f in dataset]
     )
 
-    for feature, ftype in all_features:
-        y_train = dataset[feature][train_idx].ravel()
-        y_val = dataset[feature][val_idx].ravel()
-        layer_scores: dict[int, float] = {}
-        for layer_idx in range(num_layers):
-            score = fit_probe(X_train_by_layer[layer_idx], X_val_by_layer[layer_idx], y_train, y_val, ftype)
-            layer_scores[layer_idx] = score
-        results[feature] = layer_scores
-        best = max(layer_scores.values())
-        print(f"    {feature}: best layer score = {best:.4f}")
+    results: dict[str, dict[str, dict[int, float]]] = {}
+
+    for pooling in ("mean_ctx", "last_ctx"):
+        print(f"  Extracting train activations [{pooling}] ({len(train_idx)} examples)...")
+        X_train_by_layer = extract_activations(
+            module, series[train_idx], batch_size=batch_size,
+            patch_size=patch_size, context_patches=context_patches, pred_patches=pred_patches,
+            device=device, pooling=pooling,
+        )
+
+        print(f"  Extracting val activations [{pooling}] ({len(val_idx)} examples)...")
+        X_val_by_layer = extract_activations(
+            module, series[val_idx], batch_size=batch_size,
+            patch_size=patch_size, context_patches=context_patches, pred_patches=pred_patches,
+            device=device, pooling=pooling,
+        )
+
+        layer_keys = sorted(X_train_by_layer.keys())
+        pooling_results: dict[str, dict[int, float]] = {}
+
+        for feature, ftype in all_features:
+            y_train = dataset[feature][train_idx].ravel()
+            y_val = dataset[feature][val_idx].ravel()
+            layer_scores: dict[int, float] = {}
+            for layer_idx in layer_keys:
+                score = fit_probe(X_train_by_layer[layer_idx], X_val_by_layer[layer_idx], y_train, y_val, ftype)
+                layer_scores[layer_idx] = score
+            pooling_results[feature] = layer_scores
+            best = max(layer_scores.values())
+            print(f"    [{pooling}] {feature}: best layer score = {best:.4f}")
+
+        results[pooling] = pooling_results
 
     return results
 
@@ -209,32 +228,13 @@ def extract_activations_per_patch(
     pred_patches: int = PRED_PATCHES,
     device: str | torch.device = "cpu",
 ) -> dict[int, np.ndarray]:
-    """
-    Like extract_activations but preserves the patch axis — no mean-pooling.
-
-    Returns
-    -------
-    dict layer_idx -> float32 [n, context_patches, d_model]
-    """
-    module.eval()
-    accumulated: dict[int, list[np.ndarray]] = {}
-
-    with ResidualExtractor(module) as extractor:
-        for start in range(0, len(series), batch_size):
-            chunk = series[start : start + batch_size]
-            batch = make_batch(
-                chunk,
-                patch_size=patch_size,
-                context_patches=context_patches,
-                pred_patches=pred_patches,
-                device=device,
-            )
-            acts = extractor.run(batch)
-            for layer_idx, tensor in acts.items():
-                ctx = tensor[:, :context_patches, :].numpy()  # [chunk, context_patches, d_model]
-                accumulated.setdefault(layer_idx, []).append(ctx)
-
-    return {li: np.concatenate(chunks, axis=0) for li, chunks in accumulated.items()}
+    """Deprecated: use extract_activations(..., pooling='per_patch') instead."""
+    return extract_activations(
+        module, series,
+        batch_size=batch_size, patch_size=patch_size,
+        context_patches=context_patches, pred_patches=pred_patches,
+        device=device, pooling="per_patch",
+    )
 
 
 _DEFAULT_ALPHAS = torch.tensor([1e-3, 1e-2, 1e-1, 1.0, 10.0, 100.0, 1e3])
@@ -265,54 +265,10 @@ def batched_ridge_per_patch(
     -------
     r2 : [B, k]   — validation R² per (patch, feature); clamped to [-1, 1]
     """
-    if alphas is None:
-        alphas = _DEFAULT_ALPHAS.to(X_train.device)
-
-    B, n, d = X_train.shape
-    k = Y_train.shape[1]
-    A = len(alphas)
-
-    # Standardize X per (B, d) using train statistics
-    X_mean = X_train.mean(dim=1, keepdim=True)                        # [B, 1, d]
-    X_std = X_train.std(dim=1, keepdim=True, correction=0).clamp(min=1e-8)          # [B, 1, d]
-    X_train_n = (X_train - X_mean) / X_std                            # [B, n, d]
-    X_val_n = (X_val - X_mean) / X_std                                # [B, n_val, d]
-
-    # Center Y (matches sklearn fit_intercept=True; preserves intercept-free SVD)
-    Y_mean = Y_train.mean(dim=0, keepdim=True)                        # [1, k]
-    Y_train_c = Y_train - Y_mean                                      # [n, k]
-
-    # Batched thin SVD
-    U, S, Vh = torch.linalg.svd(X_train_n, full_matrices=False)       # U:[B,n,d], S:[B,d], Vh:[B,d,d]
-    S2 = S.pow(2)                                                      # [B, d]
-    UtY = torch.einsum("bni,nk->bik", U, Y_train_c)                   # [B, d, k]
-
-    # LOO-CV on centered y: select best alpha per (B, k)
-    # ŷ_c = U diag(s²/(s²+α)) Uᵀ y_c  ;  hat_diag = diag(U diag(s²/(s²+α)) Uᵀ)
-    loo_mse_per_alpha = []
-    for alpha in alphas:
-        hat_filt = S2 / (S2 + alpha)                                   # [B, d]
-        y_hat_c = torch.einsum("bni,bi,bik->bnk", U, hat_filt, UtY)  # [B, n, k]
-        hat_diag = torch.einsum("bni,bi->bn", U.pow(2), hat_filt)     # [B, n]
-        resid = (Y_train_c[None] - y_hat_c) / (1 - hat_diag[:, :, None]).clamp(min=1e-6)
-        loo_mse_per_alpha.append(resid.pow(2).mean(dim=1))             # [B, k]
-
-    loo_mse_all = torch.stack(loo_mse_per_alpha, dim=0)                # [A, B, k]
-    best_alpha_idx = loo_mse_all.argmin(dim=0)                         # [B, k]
-
-    # Build β for all alphas then gather the best per (B, k)
-    beta_all = torch.stack(
-        [torch.einsum("bdi,bi,bik->bdk", Vh.mT, S / (S2 + alpha), UtY) for alpha in alphas],
-        dim=0,
-    )                                                                   # [A, B, d, k]
-    idx_exp = best_alpha_idx[None, :, None, :].expand(1, B, d, k)
-    beta_best = beta_all.gather(0, idx_exp).squeeze(0)                 # [B, d, k]
-
-    # Validation R² (restore Y_mean as intercept)
-    y_val_hat = torch.einsum("bnd,bdk->bnk", X_val_n, beta_best) + Y_mean[None]  # [B, n_val, k]
-    ss_res = (Y_val[None] - y_val_hat).pow(2).sum(dim=1)              # [B, k]
+    y_val_hat = _batched_ridge_predict(X_train, X_val, Y_train, alphas)  # [B, n_val, k]
+    ss_res = (Y_val[None] - y_val_hat).pow(2).sum(dim=1)                 # [B, k]
     ss_tot = (Y_val - Y_val.mean(0)).pow(2).sum(dim=0).clamp(min=1e-8)  # [k]
-    return (1 - ss_res / ss_tot).clamp(min=-1.0)                       # [B, k]
+    return (1 - ss_res / ss_tot).clamp(min=-1.0)                          # [B, k]
 
 
 def run_probes_per_patch(
@@ -339,18 +295,18 @@ def run_probes_per_patch(
     series = dataset["series"]
 
     print(f"  Extracting per-patch train activations ({len(train_idx)} examples)...")
-    X_train_by_layer = extract_activations_per_patch(
+    X_train_by_layer = extract_activations(
         module, series[train_idx], batch_size=batch_size,
         patch_size=patch_size, context_patches=context_patches,
-        pred_patches=pred_patches, device=device,
+        pred_patches=pred_patches, device=device, pooling="per_patch",
     )
     print(f"  Extracting per-patch val activations ({len(val_idx)} examples)...")
-    X_val_by_layer = extract_activations_per_patch(
+    X_val_by_layer = extract_activations(
         module, series[val_idx], batch_size=batch_size,
         patch_size=patch_size, context_patches=context_patches,
-        pred_patches=pred_patches, device=device,
+        pred_patches=pred_patches, device=device, pooling="per_patch",
     )
-    num_layers = len(X_train_by_layer)
+    layer_keys = sorted(X_train_by_layer.keys())
 
     reg_features = [f for f in REGRESSION_FEATURES if f in dataset]
     clf_features = [f for f in CLASSIFICATION_FEATURES if f in dataset]
@@ -380,7 +336,7 @@ def run_probes_per_patch(
             Y_onehot_val[torch.arange(len(val_idx)), labels_val] = 1.0
             clf_label_sets[feat] = (labels_val, Y_onehot_train, Y_onehot_val)
 
-    for layer_idx in range(num_layers):
+    for layer_idx in layer_keys:
         # Stack patch positions along batch dim: [B=context_patches, n, d]
         X_tr = torch.from_numpy(
             X_train_by_layer[layer_idx].transpose(1, 0, 2)  # [context_patches, n, d]
@@ -538,8 +494,15 @@ def main():
             device=args.device,
         )
 
-        # Convert int keys to strings for JSON serialization
-        results_serializable = {feat: {str(k): v for k, v in layers.items()} for feat, layers in results.items()}
+        # Convert int layer keys to strings for JSON serialization
+        # Format: {pooling_mode: {feature: {layer_str: score}}}
+        results_serializable = {
+            pooling: {
+                feat: {str(k): v for k, v in layers.items()}
+                for feat, layers in feat_dict.items()
+            }
+            for pooling, feat_dict in results.items()
+        }
         out_path = os.path.join(args.output_dir, f"{model_name}.json")
         with open(out_path, "w") as f:
             json.dump(results_serializable, f, indent=2)

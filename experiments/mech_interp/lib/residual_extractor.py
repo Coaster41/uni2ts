@@ -18,6 +18,11 @@ class ResidualExtractor:
                 x = out if isinstance(out, torch.Tensor) else out[0]
                 self._activations[idx] = x.detach().cpu()
             self._handles.append(layer.register_forward_hook(hook))
+        # Capture post-projection, pre-attention activation under key -1
+        def in_proj_hook(mod, inp, out, _idx=-1):
+            x = out if isinstance(out, torch.Tensor) else out[0]
+            self._activations[-1] = x.detach().cpu()
+        self._handles.append(self._module.in_proj.register_forward_hook(in_proj_hook))
         self._active = True
         return self
 

@@ -14,6 +14,7 @@ from experiments.mech_interp.lib import (
     make_batch,
     wrap_existing_dataset,
 )
+from experiments.mech_interp.lib.synthetic import generate_composite_dataset
 from experiments.mech_interp.block1_probing.train_probes import (
     CLASSIFICATION_FEATURES,
     CONTEXT_PATCHES,
@@ -74,7 +75,8 @@ def tiny_dataset():
 
 def test_extract_activations_shapes_moiraie(module_e, series):
     acts = extract_activations(module_e, series, batch_size=4)
-    assert set(acts.keys()) == set(range(_TINY["num_layers"]))
+    expected_keys = {-1} | set(range(_TINY["num_layers"]))
+    assert set(acts.keys()) == expected_keys
     for layer_idx, arr in acts.items():
         assert arr.shape == (N, _TINY["d_model"]), (
             f"Layer {layer_idx}: expected ({N}, {_TINY['d_model']}), got {arr.shape}"
@@ -83,7 +85,8 @@ def test_extract_activations_shapes_moiraie(module_e, series):
 
 def test_extract_activations_shapes_moiraic(module_c, series):
     acts = extract_activations(module_c, series, batch_size=4)
-    assert set(acts.keys()) == set(range(_TINY["num_layers"]))
+    expected_keys = {-1} | set(range(_TINY["num_layers"]))
+    assert set(acts.keys()) == expected_keys
     for layer_idx, arr in acts.items():
         assert arr.shape == (N, _TINY["d_model"])
 
@@ -146,24 +149,35 @@ def test_run_probes_for_model_structure(module_e, tiny_dataset):
 
     results = run_probes_for_model(module_e, tiny_dataset, train_idx, val_idx, batch_size=8)
 
-    expected_features = set(REGRESSION_FEATURES) | set(CLASSIFICATION_FEATURES)
-    assert set(results.keys()) == expected_features, (
-        f"Missing or extra features: got {set(results.keys())}"
+    assert set(results.keys()) == {"mean_ctx", "last_ctx"}, (
+        f"Expected pooling modes, got {set(results.keys())}"
     )
-    for feature, layer_scores in results.items():
-        assert set(layer_scores.keys()) == set(range(_TINY["num_layers"])), (
-            f"{feature}: layer keys mismatch"
+    all_known_features = set(REGRESSION_FEATURES) | set(CLASSIFICATION_FEATURES)
+    expected_layers = {-1} | set(range(_TINY["num_layers"]))
+    for pooling, feat_dict in results.items():
+        # result only contains features that exist in the dataset (a subset of all known)
+        assert set(feat_dict.keys()) <= all_known_features, (
+            f"[{pooling}] Unknown features returned: {set(feat_dict.keys()) - all_known_features}"
         )
-        for layer_idx, score in layer_scores.items():
-            assert isinstance(score, float), f"{feature} layer {layer_idx}: score is not float"
-            assert math.isfinite(score), f"{feature} layer {layer_idx}: score is not finite"
+        assert len(feat_dict) > 0, f"[{pooling}] No features in result"
+        for feature, layer_scores in feat_dict.items():
+            assert set(layer_scores.keys()) == expected_layers, (
+                f"[{pooling}] {feature}: layer keys mismatch, got {set(layer_scores.keys())}"
+            )
+            for layer_idx, score in layer_scores.items():
+                assert isinstance(score, float), f"[{pooling}] {feature} layer {layer_idx}: score is not float"
+                assert math.isfinite(score), f"[{pooling}] {feature} layer {layer_idx}: score is not finite"
 
 
 def test_run_probes_for_model_moiraic(module_c, tiny_dataset):
     n = len(tiny_dataset["series"])
     idx = np.arange(n)
     results = run_probes_for_model(module_c, tiny_dataset, idx[:80], idx[80:], batch_size=8)
-    assert set(results.keys()) == set(REGRESSION_FEATURES) | set(CLASSIFICATION_FEATURES)
+    assert set(results.keys()) == {"mean_ctx", "last_ctx"}
+    all_known_features = set(REGRESSION_FEATURES) | set(CLASSIFICATION_FEATURES)
+    for pooling_dict in results.values():
+        assert set(pooling_dict.keys()) <= all_known_features
+        assert len(pooling_dict) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -171,15 +185,17 @@ def test_run_probes_for_model_moiraic(module_c, tiny_dataset):
 # ---------------------------------------------------------------------------
 
 def test_pr0_compat_wrap_existing_dataset_label_keys():
-    """wrap_existing_dataset + DEFAULT_GENERATORS must produce the same label keys as generate_dataset."""
+    """wrap_existing_dataset + DEFAULT_GENERATORS must cover all generate_dataset label keys."""
     synth = generate_dataset(n=20, seed=0)
-    expected_keys = set(synth.keys())
+    original_keys = set(synth.keys())
 
     windows = [synth["series"][i] for i in range(20)]
     wrapped = wrap_existing_dataset(windows, DEFAULT_GENERATORS, series_length=SERIES_LENGTH, n=20, seed=0)
 
-    assert set(wrapped.keys()) == expected_keys, (
-        f"Key mismatch: wrapped={set(wrapped.keys())}, expected={expected_keys}"
+    # wrapped may have MORE keys than generate_dataset (PR-6 expanded DEFAULT_GENERATORS),
+    # but must include all original keys
+    assert original_keys <= set(wrapped.keys()), (
+        f"Missing keys: {original_keys - set(wrapped.keys())}"
     )
 
 
@@ -193,9 +209,12 @@ def test_pr0_compat_run_probes_accepts_wrapped_dataset(module_e):
     idx = np.arange(n)
     results = run_probes_for_model(module_e, wrapped, idx[:80], idx[80:], batch_size=8)
 
-    assert set(results.keys()) == set(REGRESSION_FEATURES) | set(CLASSIFICATION_FEATURES)
-    for feature, layer_scores in results.items():
-        assert len(layer_scores) == _TINY["num_layers"]
+    # results is now {pooling_mode: {feature: {layer: score}}}
+    assert set(results.keys()) == {"mean_ctx", "last_ctx"}
+    expected_layers = {-1} | set(range(_TINY["num_layers"]))
+    for pooling, feat_dict in results.items():
+        for feature, layer_scores in feat_dict.items():
+            assert set(layer_scores.keys()) == expected_layers
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +224,8 @@ def test_pr0_compat_run_probes_accepts_wrapped_dataset(module_e):
 def test_extract_activations_per_patch_shape_moiraie(module_e, series):
     """Shape must be [n, context_patches, d_model] per layer — patch axis preserved."""
     acts = extract_activations_per_patch(module_e, series, batch_size=4)
-    assert set(acts.keys()) == set(range(_TINY["num_layers"]))
+    expected_keys = {-1} | set(range(_TINY["num_layers"]))
+    assert set(acts.keys()) == expected_keys
     for layer_idx, arr in acts.items():
         assert arr.shape == (N, CONTEXT_PATCHES, _TINY["d_model"]), (
             f"Layer {layer_idx}: expected ({N}, {CONTEXT_PATCHES}, {_TINY['d_model']}), got {arr.shape}"
@@ -214,6 +234,8 @@ def test_extract_activations_per_patch_shape_moiraie(module_e, series):
 
 def test_extract_activations_per_patch_shape_moiraic(module_c, series):
     acts = extract_activations_per_patch(module_c, series, batch_size=4)
+    expected_keys = {-1} | set(range(_TINY["num_layers"]))
+    assert set(acts.keys()) == expected_keys
     for arr in acts.values():
         assert arr.shape == (N, CONTEXT_PATCHES, _TINY["d_model"])
 
@@ -294,11 +316,13 @@ def test_run_probes_per_patch_structure(module_e, tiny_dataset):
     idx = np.arange(n)
     results = run_probes_per_patch(module_e, tiny_dataset, idx[:80], idx[80:], batch_size=8)
 
-    expected_features = set(REGRESSION_FEATURES) | set(CLASSIFICATION_FEATURES)
-    assert set(results.keys()) == expected_features
+    all_known_features = set(REGRESSION_FEATURES) | set(CLASSIFICATION_FEATURES)
+    assert set(results.keys()) <= all_known_features
+    assert len(results) > 0
 
+    expected_layers = {-1} | set(range(_TINY["num_layers"]))
     for feat, layer_dict in results.items():
-        assert set(layer_dict.keys()) == set(range(_TINY["num_layers"]))
+        assert set(layer_dict.keys()) == expected_layers
         for layer_idx, patch_dict in layer_dict.items():
             assert len(patch_dict) == CONTEXT_PATCHES, (
                 f"{feat} layer {layer_idx}: expected {CONTEXT_PATCHES} patches, got {len(patch_dict)}"
@@ -312,4 +336,69 @@ def test_run_probes_per_patch_moiraic(module_c, tiny_dataset):
     n = len(tiny_dataset["series"])
     idx = np.arange(n)
     results = run_probes_per_patch(module_c, tiny_dataset, idx[:80], idx[80:], batch_size=8)
-    assert set(results.keys()) == set(REGRESSION_FEATURES) | set(CLASSIFICATION_FEATURES)
+    all_known_features = set(REGRESSION_FEATURES) | set(CLASSIFICATION_FEATURES)
+    assert set(results.keys()) <= all_known_features
+    assert len(results) > 0
+    expected_layers = {-1} | set(range(_TINY["num_layers"]))
+    for feat, layer_dict in results.items():
+        assert set(layer_dict.keys()) == expected_layers
+
+
+# ---------------------------------------------------------------------------
+# PR-7: Layer-0 baseline + last_ctx pooling
+# ---------------------------------------------------------------------------
+
+def test_layer0_extraction_shape(module_e, series):
+    """ResidualExtractor returns key -1 with shape [n, context_patches, d_model] after slice."""
+    from experiments.mech_interp.lib import make_batch
+    batch = make_batch(series, patch_size=PATCH_SIZE, context_patches=CONTEXT_PATCHES, pred_patches=PRED_PATCHES)
+    with ResidualExtractor(module_e) as ext:
+        acts = ext.run(batch)
+    assert -1 in acts, "ResidualExtractor must return key -1 for in_proj activation"
+    ctx_slice = acts[-1][:, :CONTEXT_PATCHES, :]
+    assert ctx_slice.shape == (N, CONTEXT_PATCHES, _TINY["d_model"]), (
+        f"Expected ({N}, {CONTEXT_PATCHES}, {_TINY['d_model']}), got {ctx_slice.shape}"
+    )
+
+
+def test_layer0_included_in_activations(module_e, series):
+    """extract_activations with default pooling='mean_ctx' returns key -1 alongside 0..num_layers-1."""
+    acts = extract_activations(module_e, series, batch_size=4)
+    expected_keys = {-1} | set(range(_TINY["num_layers"]))
+    assert set(acts.keys()) == expected_keys, (
+        f"Expected layer keys {expected_keys}, got {set(acts.keys())}"
+    )
+    assert acts[-1].shape == (N, _TINY["d_model"]), (
+        f"Layer -1 shape: expected ({N}, {_TINY['d_model']}), got {acts[-1].shape}"
+    )
+
+
+def test_last_ctx_matches_position_31(module_e, series):
+    """extract_activations(..., pooling='last_ctx')[layer] equals per_patch[layer][:, -1, :] for all layers."""
+    last_acts = extract_activations(module_e, series, batch_size=4, pooling="last_ctx")
+    per_patch_acts = extract_activations_per_patch(module_e, series, batch_size=4)
+
+    for layer_idx in sorted(last_acts.keys()):
+        expected = per_patch_acts[layer_idx][:, CONTEXT_PATCHES - 1, :]
+        actual = last_acts[layer_idx]
+        assert np.array_equal(actual, expected), (
+            f"Layer {layer_idx}: last_ctx not bit-exact with per_patch[:, {CONTEXT_PATCHES - 1}, :]"
+        )
+
+
+def test_mean_ctx_and_last_ctx_shapes(module_e, series):
+    """Both pooling modes return [n, d_model] per layer including layer -1."""
+    mean_acts = extract_activations(module_e, series, batch_size=4, pooling="mean_ctx")
+    last_acts = extract_activations(module_e, series, batch_size=4, pooling="last_ctx")
+
+    expected_keys = {-1} | set(range(_TINY["num_layers"]))
+    assert set(mean_acts.keys()) == expected_keys
+    assert set(last_acts.keys()) == expected_keys
+
+    for layer_idx in expected_keys:
+        assert mean_acts[layer_idx].shape == (N, _TINY["d_model"]), (
+            f"mean_ctx layer {layer_idx}: expected ({N}, {_TINY['d_model']}), got {mean_acts[layer_idx].shape}"
+        )
+        assert last_acts[layer_idx].shape == (N, _TINY["d_model"]), (
+            f"last_ctx layer {layer_idx}: expected ({N}, {_TINY['d_model']}), got {last_acts[layer_idx].shape}"
+        )

@@ -50,7 +50,8 @@ def test_residual_extractor_moiraie_shapes(module_e, batch):
     with ResidualExtractor(module_e) as extractor:
         acts = extractor.run(batch)
 
-    assert set(acts.keys()) == set(range(_TINY["num_layers"]))
+    expected_keys = {-1} | set(range(_TINY["num_layers"]))
+    assert set(acts.keys()) == expected_keys
     for layer_idx, tensor in acts.items():
         assert tensor.shape == (BATCH_SIZE, N_PATCHES, _TINY["d_model"]), (
             f"Layer {layer_idx}: expected {(BATCH_SIZE, N_PATCHES, _TINY['d_model'])}, got {tensor.shape}"
@@ -61,7 +62,8 @@ def test_residual_extractor_moiraic_shapes(module_c, batch):
     with ResidualExtractor(module_c) as extractor:
         acts = extractor.run(batch)
 
-    assert set(acts.keys()) == set(range(_TINY["num_layers"]))
+    expected_keys = {-1} | set(range(_TINY["num_layers"]))
+    assert set(acts.keys()) == expected_keys
     for layer_idx, tensor in acts.items():
         assert tensor.shape == (BATCH_SIZE, N_PATCHES, _TINY["d_model"]), (
             f"Layer {layer_idx}: expected {(BATCH_SIZE, N_PATCHES, _TINY['d_model'])}, got {tensor.shape}"
@@ -79,15 +81,20 @@ def test_residual_extractor_detached_cpu(module_e, batch):
 
 def test_residual_extractor_context_manager_cleanup(module_e, batch):
     hooks_before = sum(len(layer._forward_hooks) for layer in module_e.encoder.layers)
+    in_proj_hooks_before = len(module_e.in_proj._forward_hooks)
 
     with ResidualExtractor(module_e) as extractor:
         hooks_during = sum(len(layer._forward_hooks) for layer in module_e.encoder.layers)
+        in_proj_hooks_during = len(module_e.in_proj._forward_hooks)
         extractor.run(batch)
 
     hooks_after = sum(len(layer._forward_hooks) for layer in module_e.encoder.layers)
+    in_proj_hooks_after = len(module_e.in_proj._forward_hooks)
 
     assert hooks_during == hooks_before + _TINY["num_layers"]
+    assert in_proj_hooks_during == in_proj_hooks_before + 1
     assert hooks_after == hooks_before
+    assert in_proj_hooks_after == in_proj_hooks_before
 
 
 def test_residual_extractor_run_outside_context_raises(module_e, batch):
