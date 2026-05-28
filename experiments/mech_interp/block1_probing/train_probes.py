@@ -94,6 +94,7 @@ FORECAST_REGRESSION_FEATURES = [
     "fc_ctx_corr",
     "fc_ctx_corr_seasonal",
     "fc_iqr_mean",
+    "fc_iqr_mean_scaled",
     "fc_iqr_slope",
     "mase",
     "swql",
@@ -163,7 +164,10 @@ def _apply_corruptions(
             period_idx = int(np.argmin(np.abs(np.array(PERIOD_BINS, dtype=float) - raw_period)))
             phase = 0.0
 
-        result["no_seasonal"][out_i] = corrupt_seasonal(series, period_idx, phase)
+        if np.isnan(phase) or period_idx < 0:
+            result["no_seasonal"][out_i] = series
+        else:
+            result["no_seasonal"][out_i] = corrupt_seasonal(series, period_idx, phase)
         result["noise"][out_i] = corrupt_noise(series, seed)
         result["mean_center"][out_i] = corrupt_mean_center(series)
         result["reverse"][out_i] = corrupt_reverse(series)

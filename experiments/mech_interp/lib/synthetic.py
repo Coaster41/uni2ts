@@ -3,6 +3,8 @@ from itertools import combinations as _combinations
 import numpy as np
 
 PERIOD_BINS = [7, 24, 30, 12, 8, 16, 32, 64]  # dominant period choices, in time steps
+MODES_DIST = (0.2, 0.35, 0.45)
+CONCEPT_WEIGHTS = [1, 0.8, 2, 5, 0.7, 1, 1.5] 
 
 
 # ── Per-concept component generators ─────────────────────────────────────────
@@ -227,8 +229,8 @@ def generate_dataset(
 
 def generate_composite_dataset(
     n: int = 5000,
-    modes_dist: tuple[float, float, float] = (0.5, 0.35, 0.15),
-    concept_weights: tuple[float, ...] | None = None,
+    modes_dist: tuple[float, float, float] = MODES_DIST,
+    concept_weights: tuple[float, ...] | None = CONCEPT_WEIGHTS,
     seed: int = 42,
     patch_size: int = 16,
     context_patches: int = 32,

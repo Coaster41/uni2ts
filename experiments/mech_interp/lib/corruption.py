@@ -22,7 +22,10 @@ def corrupt_seasonal(series: np.ndarray, period_idx: int, phase: float) -> np.nd
     t = np.arange(len(series), dtype=np.float64)
     omega = 2 * np.pi / period
     basis = np.stack([np.cos(omega * t + phase), np.sin(omega * t + phase)], axis=1)
-    coeffs, _, _, _ = np.linalg.lstsq(basis, series.astype(np.float64), rcond=None)
+    try:
+        coeffs, _, _, _ = np.linalg.lstsq(basis, series.astype(np.float64), rcond=None)
+    except np.linalg.LinAlgError:
+        return series.copy()
     seasonal = basis @ coeffs
     return (series - seasonal).astype(series.dtype)
 

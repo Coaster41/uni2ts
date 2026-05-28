@@ -102,19 +102,45 @@ def fit_probes(
         reg_items = [(f, s) for f, s in y_specs.items() if s[4] == "regression"]
         if not reg_items:
             return {}
-        Y_tr = torch.from_numpy(
-            np.stack([s[0] for _, s in reg_items], axis=1).astype(np.float32)
-        )
-        Y_va = torch.from_numpy(
-            np.stack([s[1] for _, s in reg_items], axis=1).astype(np.float32)
-        )
-        with torch.no_grad():
-            r2 = batched_ridge_per_patch(X_tr, X_va, Y_tr, Y_va)
-        B = r2.shape[0]
-        return {
-            feat: {str(p): float(r2[p, ki]) for p in range(B)}
-            for ki, (feat, _) in enumerate(reg_items)
-        }
+
+        # Separate NaN-containing features from clean ones; NaN must be masked
+        # per-feature because each concept has a different missingness pattern.
+        clean_items = [(f, s) for f, s in reg_items
+                       if not (np.isnan(s[0]).any() or np.isnan(s[1]).any())]
+        nan_items   = [(f, s) for f, s in reg_items
+                       if np.isnan(s[0]).any() or np.isnan(s[1]).any()]
+
+        results: dict = {}
+
+        if clean_items:
+            Y_tr = torch.from_numpy(
+                np.stack([s[0] for _, s in clean_items], axis=1).astype(np.float32)
+            )
+            Y_va = torch.from_numpy(
+                np.stack([s[1] for _, s in clean_items], axis=1).astype(np.float32)
+            )
+            with torch.no_grad():
+                r2 = batched_ridge_per_patch(X_tr, X_va, Y_tr, Y_va)
+            B = r2.shape[0]
+            for ki, (feat, _) in enumerate(clean_items):
+                results[feat] = {str(p): float(r2[p, ki]) for p in range(B)}
+
+        for feat, s in nan_items:
+            y_tr_f, y_va_f = s[0], s[1]
+            mask_tr = np.isfinite(y_tr_f)
+            mask_va = np.isfinite(y_va_f)
+            if mask_tr.sum() < min_samples or mask_va.sum() < min_samples:
+                continue
+            Y_tr_f = torch.from_numpy(y_tr_f[mask_tr, None].astype(np.float32))
+            Y_va_f = torch.from_numpy(y_va_f[mask_va, None].astype(np.float32))
+            X_tr_f = X_tr[:, mask_tr, :]
+            X_va_f = X_va[:, mask_va, :]
+            with torch.no_grad():
+                r2_f = batched_ridge_per_patch(X_tr_f, X_va_f, Y_tr_f, Y_va_f)
+            B = r2_f.shape[0]
+            results[feat] = {str(p): float(r2_f[p, 0]) for p in range(B)}
+
+        return results
 
     else:
         raise ValueError(f"Unknown backend {backend!r}; expected 'auto', 'pooled', or 'per_patch'")

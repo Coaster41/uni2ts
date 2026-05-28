@@ -63,6 +63,11 @@ def fc_iqr_mean(forecast_quantiles: np.ndarray) -> float:
     iqr = forecast_quantiles[-1] - forecast_quantiles[0]  # q0.9 - q0.1
     return float(iqr.mean())
 
+def fc_iqr_mean_scaled(forecast_quantiles: np.ndarray) -> float:
+    """Mean of (q0.9 - q0.1) over the forecast horizon."""
+    iqr = forecast_quantiles[-1] - forecast_quantiles[0]  # q0.9 - q0.1
+    return float(iqr.mean()) / max(abs(forecast_quantiles[4].mean()), 1e-5)
+
 
 def fc_iqr_slope(forecast_quantiles: np.ndarray) -> float:
     """Linear slope of IQR over the forecast horizon. Positive = growing uncertainty."""
@@ -127,6 +132,7 @@ def compute_all(
         "fc_ctx_corr": fc_ctx_corr(fq, ctx),
         "fc_ctx_corr_seasonal": fc_ctx_corr_seasonal(fq, ctx, ctx_period),
         "fc_iqr_mean": fc_iqr_mean(fq),
+        "fc_iqr_mean_scaled": fc_iqr_mean_scaled(fq),
         "fc_iqr_slope": fc_iqr_slope(fq),
         "mase": compute_mase(fq, tgt, ctx),
         "swql": compute_swql(fq, tgt, ctx),
