@@ -354,7 +354,7 @@ def test_layer0_extraction_shape(module_e, series):
     from experiments.mech_interp.lib import make_batch
     batch = make_batch(series, patch_size=PATCH_SIZE, context_patches=CONTEXT_PATCHES, pred_patches=PRED_PATCHES)
     with ResidualExtractor(module_e) as ext:
-        acts = ext.run(batch)
+        acts, _ = ext.run(batch)
     assert -1 in acts, "ResidualExtractor must return key -1 for in_proj activation"
     ctx_slice = acts[-1][:, :CONTEXT_PATCHES, :]
     assert ctx_slice.shape == (N, CONTEXT_PATCHES, _TINY["d_model"]), (

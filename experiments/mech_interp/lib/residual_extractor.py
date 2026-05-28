@@ -32,14 +32,21 @@ class ResidualExtractor:
         self._handles = []
         self._active = False
 
-    def run(self, batch) -> dict:
+    def run(self, batch) -> tuple[dict, torch.Tensor]:
+        """Run a forward pass and return (activations, module_output).
+
+        activations : dict[int, Tensor]  — per-layer residual stream, keyed by layer index
+                      (key -1 = post-projection, pre-attention; shape [B, n_patches, d_model])
+        module_output : Tensor           — raw output of the module forward pass
+                        ([B, n_patches, npt*Q*P] for both Moiraie and Moiraic)
+        """
         if not self._active:
             raise RuntimeError("ResidualExtractor must be used as a context manager")
         self._activations = {}
         is_moiraic = type(self._module).__name__.startswith("Moiraic")
         with torch.no_grad():
             if is_moiraic:
-                self._module(**batch, training_mode=False, past_cache=None, return_cache=False)
+                output = self._module(**batch, training_mode=False, past_cache=None, return_cache=False)
             else:
-                self._module(**batch, training_mode=False)
-        return dict(self._activations)
+                output = self._module(**batch, training_mode=False)
+        return dict(self._activations), output

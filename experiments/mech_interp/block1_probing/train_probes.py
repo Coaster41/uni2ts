@@ -88,7 +88,7 @@ def extract_activations(
         for start in range(0, len(series), batch_size):
             chunk = series[start : start + batch_size]
             batch = make_batch(chunk, patch_size=patch_size, context_patches=context_patches, pred_patches=pred_patches, device=device)
-            acts = extractor.run(batch)  # dict[int, Tensor[chunk, n_patches, d_model]]
+            acts, _ = extractor.run(batch)  # dict[int, Tensor[chunk, n_patches, d_model]]
             for layer_idx, tensor in acts.items():
                 ctx_acts = tensor[:, :context_patches, :]   # [chunk, context_patches, d_model]
                 if pooling == "mean_ctx":

@@ -111,13 +111,8 @@ def run_and_save(
         batch = make_batch(chunk, PATCH_SIZE, CONTEXT_PATCHES, PRED_PATCHES, device)
 
         with ResidualExtractor(module) as extractor:
-            with torch.no_grad():
-                if is_moiraic:
-                    result = module(**batch, training_mode=False,
-                                    past_cache=None, return_cache=False)
-                else:
-                    result = module(**batch, training_mode=False)
-            raw_acts = {k: v.float().numpy() for k, v in extractor._activations.items()}
+            raw_acts_tensors, result = extractor.run(batch)
+        raw_acts = {k: v.float().numpy() for k, v in raw_acts_tensors.items()}
 
         result_np = result.detach().cpu().float().numpy()
         fq = _extract_fq(result_np, is_moiraic, npt, Q, P)

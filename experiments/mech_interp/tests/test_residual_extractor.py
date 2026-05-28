@@ -48,7 +48,7 @@ def module_c():
 
 def test_residual_extractor_moiraie_shapes(module_e, batch):
     with ResidualExtractor(module_e) as extractor:
-        acts = extractor.run(batch)
+        acts, _ = extractor.run(batch)
 
     expected_keys = {-1} | set(range(_TINY["num_layers"]))
     assert set(acts.keys()) == expected_keys
@@ -60,7 +60,7 @@ def test_residual_extractor_moiraie_shapes(module_e, batch):
 
 def test_residual_extractor_moiraic_shapes(module_c, batch):
     with ResidualExtractor(module_c) as extractor:
-        acts = extractor.run(batch)
+        acts, _ = extractor.run(batch)
 
     expected_keys = {-1} | set(range(_TINY["num_layers"]))
     assert set(acts.keys()) == expected_keys
@@ -72,7 +72,7 @@ def test_residual_extractor_moiraic_shapes(module_c, batch):
 
 def test_residual_extractor_detached_cpu(module_e, batch):
     with ResidualExtractor(module_e) as extractor:
-        acts = extractor.run(batch)
+        acts, _ = extractor.run(batch)
 
     for layer_idx, tensor in acts.items():
         assert tensor.device == torch.device("cpu"), f"Layer {layer_idx} tensor not on CPU"
