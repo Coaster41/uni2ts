@@ -1,7 +1,16 @@
 import numpy as np
 import pytest
 
-from experiments.mech_interp.lib.corruption import corrupt_add_noise, corrupt_noise, corrupt_seasonal, corrupt_trend
+from experiments.mech_interp.lib.corruption import (
+    corrupt_add_noise,
+    corrupt_mean_center,
+    corrupt_noise,
+    corrupt_reverse,
+    corrupt_seasonal,
+    corrupt_shuffle_patches,
+    corrupt_trend,
+    corrupt_zero_segment,
+)
 from experiments.mech_interp.lib.metrics import (
     mase,
     scaled_weighted_quantile_loss,
@@ -244,3 +253,84 @@ def test_swql_perfect_forecast_zero():
     q = np.array([0.5])
     context = np.array([0.0, 1.0, 2.0, 3.0])
     assert scaled_weighted_quantile_loss(f, q, y, context) == pytest.approx(0.0, abs=1e-8)
+
+
+# ---------------------------------------------------------------------------
+# corrupt_mean_center
+# ---------------------------------------------------------------------------
+
+def test_corrupt_mean_center_shape():
+    series = np.random.default_rng(10).standard_normal(T).astype(np.float32)
+    out = corrupt_mean_center(series)
+    assert out.shape == series.shape
+    assert out.dtype == series.dtype
+    assert abs(float(out[:512].mean())) < 1e-5
+
+
+def test_corrupt_mean_center_horizon_shifted():
+    series = np.random.default_rng(11).standard_normal(T).astype(np.float32)
+    ctx_mean = float(series[:512].mean())
+    out = corrupt_mean_center(series)
+    np.testing.assert_allclose(out[512:], series[512:] - ctx_mean, rtol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# corrupt_reverse
+# ---------------------------------------------------------------------------
+
+def test_corrupt_reverse_shape():
+    series = np.random.default_rng(12).standard_normal(T).astype(np.float32)
+    out = corrupt_reverse(series)
+    assert out.shape == series.shape
+    assert out.dtype == series.dtype
+    np.testing.assert_array_equal(out[:512], series[:512][::-1])
+    np.testing.assert_array_equal(out[512:], series[512:])
+
+
+# ---------------------------------------------------------------------------
+# corrupt_shuffle_patches
+# ---------------------------------------------------------------------------
+
+def test_corrupt_shuffle_patches_shape():
+    series = np.random.default_rng(13).standard_normal(T).astype(np.float32)
+    out = corrupt_shuffle_patches(series, seed=0)
+    assert out.shape == series.shape
+    assert out.dtype == series.dtype
+    # horizon unchanged
+    np.testing.assert_array_equal(out[512:], series[512:])
+    # same values present, just reordered
+    np.testing.assert_array_equal(np.sort(out[:512]), np.sort(series[:512]))
+
+
+def test_corrupt_shuffle_patches_reproducible():
+    series = np.random.default_rng(14).standard_normal(T).astype(np.float32)
+    out1 = corrupt_shuffle_patches(series, seed=42)
+    out2 = corrupt_shuffle_patches(series, seed=42)
+    np.testing.assert_array_equal(out1, out2)
+    out3 = corrupt_shuffle_patches(series, seed=99)
+    assert not np.array_equal(out1, out3)
+
+
+# ---------------------------------------------------------------------------
+# corrupt_zero_segment
+# ---------------------------------------------------------------------------
+
+def test_corrupt_zero_segment_shape():
+    series = np.random.default_rng(15).standard_normal(T).astype(np.float32)
+    out = corrupt_zero_segment(series, seed=0)
+    assert out.shape == series.shape
+    assert out.dtype == series.dtype
+    # horizon unchanged
+    np.testing.assert_array_equal(out[512:], series[512:])
+    # exactly 4*16=64 zeros exist somewhere in context
+    assert (out[:512] == 0).sum() >= 64
+
+
+def test_corrupt_zero_segment_reproducible():
+    series = np.random.default_rng(16).standard_normal(T).astype(np.float32)
+    out1 = corrupt_zero_segment(series, seed=7)
+    out2 = corrupt_zero_segment(series, seed=7)
+    np.testing.assert_array_equal(out1, out2)
+    out3 = corrupt_zero_segment(series, seed=999)
+    # different seeds likely zero different segments (not guaranteed but extremely probable)
+    assert not np.array_equal(out1[:512], out3[:512])

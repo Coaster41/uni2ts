@@ -1,7 +1,16 @@
 from .attn_extractor import AttentionExtractor
 from .batch_prep import make_batch
 from .residual_extractor import ResidualExtractor
-from .corruption import corrupt_add_noise, corrupt_noise, corrupt_seasonal, corrupt_trend
+from .corruption import (
+    corrupt_add_noise,
+    corrupt_mean_center,
+    corrupt_noise,
+    corrupt_reverse,
+    corrupt_seasonal,
+    corrupt_shuffle_patches,
+    corrupt_trend,
+    corrupt_zero_segment,
+)
 from .dataset import load_gift_eval_series, wrap_existing_dataset
 from .real_data import load_gift_subset
 from .utils import _load_module
@@ -62,6 +71,10 @@ __all__ = [
     "corrupt_seasonal",
     "corrupt_noise",
     "corrupt_add_noise",
+    "corrupt_mean_center",
+    "corrupt_reverse",
+    "corrupt_shuffle_patches",
+    "corrupt_zero_segment",
     "mase",
     "weighted_quantile_loss",
     "scaled_weighted_quantile_loss",
