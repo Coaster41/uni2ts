@@ -292,3 +292,71 @@ def _batched_ridge_predict(
     idx_exp = best_alpha_idx[None, :, None, :].expand(1, B, d, k)
     beta_best = beta_all.gather(0, idx_exp).squeeze(0)
     return torch.einsum("bnd,bdk->bnk", X_val_n, beta_best) + Y_mean[None]
+
+
+def _batched_ridge_predict_local(
+    X_train: torch.Tensor,
+    X_val: torch.Tensor,
+    Y_train: torch.Tensor,
+    alphas: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Batched ridge with *per-patch* labels (Y varies along the batch/patch dim).
+
+    Mirrors ``_batched_ridge_predict`` but ``Y_train`` is ``[B, n_train, k]`` instead of the
+    shared ``[n_train, k]``; returns ``y_val_hat : [B, n_val, k]``.
+    """
+    if alphas is None:
+        alphas = _DEFAULT_ALPHAS.to(X_train.device)
+
+    B, n, d = X_train.shape
+    k = Y_train.shape[2]
+
+    X_mean = X_train.mean(dim=1, keepdim=True)
+    X_std = X_train.std(dim=1, keepdim=True, correction=0).clamp(min=1e-8)
+    X_train_n = (X_train - X_mean) / X_std
+    X_val_n = (X_val - X_mean) / X_std
+
+    Y_mean = Y_train.mean(dim=1, keepdim=True)        # [B, 1, k]
+    Y_train_c = Y_train - Y_mean
+
+    U, S, Vh = torch.linalg.svd(X_train_n, full_matrices=False)
+    S2 = S.pow(2)
+    UtY = torch.einsum("bni,bnk->bik", U, Y_train_c)
+
+    loo_mse_per_alpha = []
+    for alpha in alphas:
+        hat_filt = S2 / (S2 + alpha)
+        y_hat_c = torch.einsum("bni,bi,bik->bnk", U, hat_filt, UtY)
+        hat_diag = torch.einsum("bni,bi->bn", U.pow(2), hat_filt)
+        resid = (Y_train_c - y_hat_c) / (1 - hat_diag[:, :, None]).clamp(min=1e-6)
+        loo_mse_per_alpha.append(resid.pow(2).mean(dim=1))
+
+    loo_mse_all = torch.stack(loo_mse_per_alpha, dim=0)
+    best_alpha_idx = loo_mse_all.argmin(dim=0)
+
+    beta_all = torch.stack(
+        [torch.einsum("bdi,bi,bik->bdk", Vh.mT, S / (S2 + alpha), UtY) for alpha in alphas],
+        dim=0,
+    )
+    idx_exp = best_alpha_idx[None, :, None, :].expand(1, B, d, k)
+    beta_best = beta_all.gather(0, idx_exp).squeeze(0)
+    return torch.einsum("bnd,bdk->bnk", X_val_n, beta_best) + Y_mean
+
+
+def batched_ridge_per_patch_local(
+    X_train: torch.Tensor,
+    X_val: torch.Tensor,
+    Y_train: torch.Tensor,
+    Y_val: torch.Tensor,
+    alphas: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Per-patch ridge R² where labels are local to each patch.
+
+    X_train/X_val : [B, n, d] / [B, m, d]   (B = patch positions)
+    Y_train/Y_val : [B, n, k] / [B, m, k]
+    Returns r2 : [B, k] clamped to [-1, ∞).
+    """
+    y_val_hat = _batched_ridge_predict_local(X_train, X_val, Y_train, alphas)
+    ss_res = (Y_val - y_val_hat).pow(2).sum(dim=1)
+    ss_tot = (Y_val - Y_val.mean(1, keepdim=True)).pow(2).sum(dim=1).clamp(min=1e-8)
+    return (1 - ss_res / ss_tot).clamp(min=-1.0)

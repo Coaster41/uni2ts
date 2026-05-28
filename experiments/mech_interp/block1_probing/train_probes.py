@@ -24,7 +24,7 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
-from experiments.mech_interp.lib import ResidualExtractor, make_batch
+from experiments.mech_interp.lib import ResidualExtractor, compute_patch_features, make_batch
 from experiments.mech_interp.lib.utils import _load_module
 from experiments.mech_interp.block1_probing.probe_utils import (
     PATCH_SIZE,
@@ -37,7 +37,9 @@ from experiments.mech_interp.block1_probing.probe_utils import (
     extract_activations,
     extract_activations_per_patch,
     batched_ridge_per_patch,
+    batched_ridge_per_patch_local,
     _batched_ridge_predict,
+    _batched_ridge_predict_local,
 )
 
 # ---------------------------------------------------------------------------
@@ -101,6 +103,19 @@ FORECAST_REGRESSION_FEATURES = [
     "quantile_calibration_err",
 ]
 FORECAST_BINARY_FEATURES = ["is_flat", "is_poor"]
+
+# Per-patch *local* features (computed in lib/patch_features.py). Group C (the
+# ground-truth anomaly flags) is only produced for synthetic data.
+PATCH_REGRESSION_FEATURES = [
+    "patch_mean", "patch_std", "patch_slope", "patch_range",
+    "patch_acf1", "patch_net_change",
+    "patch_mean_dev", "patch_logstd_ratio", "patch_mean_rank",
+]
+PATCH_BINARY_FEATURES = [
+    "patch_is_level_outlier", "patch_has_pointspike",          # data-driven (any data)
+    "patch_has_spike", "patch_has_levelshift",                 # ground-truth (synth only)
+    "patch_has_varshift", "patch_is_post_varshift",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -799,7 +814,84 @@ def _run_per_patch_probes_universal(
 # main
 # ---------------------------------------------------------------------------
 
-def _build_metadata(mode: str, features: list[tuple[str, str]], with_forecast: bool) -> dict:
+def _run_patch_feature_probes(
+    module,
+    dataset: dict[str, np.ndarray],
+    train_idx: np.ndarray,
+    val_idx: np.ndarray,
+    batch_size: int,
+    device: str | torch.device,
+) -> dict[str, dict[str, dict[str, float]]]:
+    """
+    Probe per-patch *local* labels: at each (layer, patch_idx) predict the local feature
+    of that patch. Regression scored by R², binary anomaly flags by per-patch AUROC.
+
+    Returns {feature: {layer_str: {patch_str: score}}}
+    """
+    from sklearn.metrics import roc_auc_score
+
+    reg, binf = compute_patch_features(dataset, CONTEXT_PATCHES, PATCH_SIZE)
+    series = dataset["series"]
+
+    print(f"  Extracting per-patch activations ({len(train_idx)}+{len(val_idx)} examples)...")
+    acts = extract_activations(
+        module, series, batch_size=batch_size, device=device, pooling="per_patch",
+    )  # {layer: [n, C, d]}
+    layer_keys = sorted(acts.keys())
+
+    # Labels -> [C, n_split] (patch dim first to align with [C, n, d] activations).
+    def _split_labels(d):
+        return ({f: v[train_idx].T for f, v in d.items()},
+                {f: v[val_idx].T for f, v in d.items()})
+    reg_tr, reg_va = _split_labels(reg)
+    bin_tr, bin_va = _split_labels(binf)
+
+    Y_reg_tr = torch.from_numpy(np.stack([reg_tr[f] for f in reg], axis=2).astype(np.float32))  # [C,n,k]
+    Y_reg_va = torch.from_numpy(np.stack([reg_va[f] for f in reg], axis=2).astype(np.float32))
+
+    results: dict[str, dict[str, dict[str, float]]] = {f: {} for f in list(reg) + list(binf)}
+
+    for layer_idx in layer_keys:
+        X_tr = torch.from_numpy(acts[layer_idx][train_idx].transpose(1, 0, 2))  # [C, n_tr, d]
+        X_va = torch.from_numpy(acts[layer_idx][val_idx].transpose(1, 0, 2))
+        B = X_tr.shape[0]
+
+        with torch.no_grad():
+            r2 = batched_ridge_per_patch_local(X_tr, X_va, Y_reg_tr, Y_reg_va)
+        for ki, f in enumerate(reg):
+            results[f][str(layer_idx)] = {str(p): float(r2[p, ki]) for p in range(B)}
+
+        # Binary flags: ridge-as-scorer, per-patch AUROC with min-positive guard.
+        for f in binf:
+            Y_tr = torch.from_numpy(bin_tr[f][:, :, None].astype(np.float32))  # [C, n_tr, 1]
+            with torch.no_grad():
+                scores = _batched_ridge_predict_local(X_tr, X_va, Y_tr).squeeze(-1).numpy()  # [C, n_va]
+            y_va = bin_va[f]  # [C, n_va]
+            auroc: dict[str, float] = {}
+            for p in range(B):
+                pos = int(y_va[p].sum())
+                if pos < 1 or pos == y_va.shape[1]:
+                    auroc[str(p)] = float("nan")
+                else:
+                    try:
+                        auroc[str(p)] = float(roc_auc_score(y_va[p].astype(int), scores[p]))
+                    except Exception:
+                        auroc[str(p)] = float("nan")
+            results[f][str(layer_idx)] = auroc
+
+        best = {f: max(results[f][str(layer_idx)].values()) for f in reg}
+        print(f"    Layer {layer_idx}: best patch R² — "
+              + ", ".join(f"{f}={v:.3f}" for f, v in best.items()))
+
+    return results
+
+
+def _build_metadata(
+    mode: str,
+    features: list[tuple[str, str]],
+    with_forecast: bool,
+    with_patch_features: bool = False,
+) -> dict:
     clf_meta = {
         "period_idx":      {"n_classes": 8,           "baseline": 1 / 8,           "metric": "accuracy"},
         "spike_patch_idx": {"n_classes": CONTEXT_PATCHES, "baseline": 1 / CONTEXT_PATCHES, "metric": "accuracy"},
@@ -818,6 +910,9 @@ def _build_metadata(mode: str, features: list[tuple[str, str]], with_forecast: b
     if with_forecast:
         all_feats += [(f, "regression") for f in FORECAST_REGRESSION_FEATURES]
         all_feats += [(f, "binary") for f in FORECAST_BINARY_FEATURES]
+    if with_patch_features:
+        all_feats += [(f, "regression") for f in PATCH_REGRESSION_FEATURES]
+        all_feats += [(f, "binary") for f in PATCH_BINARY_FEATURES]
 
     feat_meta: dict = {}
     for f, ftype in all_feats:
@@ -838,6 +933,8 @@ def main():
                         help="Pooling modes: 'mean', int patch index, 'all' (per-patch)")
     parser.add_argument("--forecast", action=argparse.BooleanOptionalAction, default=True,
                         help="Include forecast-output features (default: True)")
+    parser.add_argument("--patch-features", action="store_true",
+                        help="Probe per-patch local labels (writes {model}_patch_features.json)")
     parser.add_argument("--model", choices=["moiraie", "moiraic", "both"], default="both")
     parser.add_argument("--moiraie-ckpt", default=None)
     parser.add_argument("--moiraic-ckpt", default=None)
@@ -951,8 +1048,20 @@ def main():
                     json.dump(pp_results, f, indent=2)
                 print(f"  Saved: {pp_path}")
 
+        # ---- Per-patch local feature probes ----
+        if args.patch_features:
+            print(f"\n=== {model_name} (patch-features) ===")
+            pf_results = _run_patch_feature_probes(
+                module, dataset, train_idx, val_idx,
+                batch_size=args.batch_size, device=args.device,
+            )
+            pf_path = os.path.join(args.output_dir, f"{model_name}_patch_features.json")
+            with open(pf_path, "w") as f:
+                json.dump(pf_results, f, indent=2)
+            print(f"  Saved: {pf_path}")
+
     # ---- Metadata ----
-    metadata = _build_metadata(args.dataset, features, args.forecast)
+    metadata = _build_metadata(args.dataset, features, args.forecast, args.patch_features)
     meta_path = os.path.join(args.output_dir, "metadata.json")
     with open(meta_path, "w") as f:
         json.dump(metadata, f, indent=2)

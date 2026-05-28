@@ -24,6 +24,7 @@ from .label_generators import (
     TrendLabelGenerator,
 )
 from .metrics import mase, scaled_weighted_quantile_loss, weighted_quantile_loss
+from .patch_features import compute_patch_features
 from .synthetic import (
     component_ar1,
     component_level_shift,
@@ -78,5 +79,6 @@ __all__ = [
     "mase",
     "weighted_quantile_loss",
     "scaled_weighted_quantile_loss",
+    "compute_patch_features",
     "_load_module"
 ]
