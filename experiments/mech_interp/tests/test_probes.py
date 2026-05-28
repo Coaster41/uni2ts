@@ -15,19 +15,21 @@ from experiments.mech_interp.lib import (
     wrap_existing_dataset,
 )
 from experiments.mech_interp.lib.synthetic import generate_composite_dataset
-from experiments.mech_interp.block1_probing.train_probes import (
-    BINARY_FEATURES,
-    CLASSIFICATION_FEATURES,
+from experiments.mech_interp.block1_probing.probe_utils import (
     CONTEXT_PATCHES,
     PATCH_SIZE,
     PRED_PATCHES,
-    REGRESSION_FEATURES,
     extract_activations,
     extract_activations_per_patch,
     batched_ridge_per_patch,
+    fit_probe,
+)
+from experiments.mech_interp.block1_probing.train_probes import (
+    BINARY_FEATURES,
+    CLASSIFICATION_FEATURES,
+    REGRESSION_FEATURES,
     run_probes_for_model,
     run_probes_per_patch,
-    fit_probe,
 )
 
 _TINY = dict(
@@ -150,13 +152,13 @@ def test_run_probes_for_model_structure(module_e, tiny_dataset):
 
     results = run_probes_for_model(module_e, tiny_dataset, train_idx, val_idx, batch_size=8)
 
-    assert set(results.keys()) == {"mean_ctx", "last_ctx"}, (
-        f"Expected pooling modes, got {set(results.keys())}"
+    expected_poolings = {"mean_ctx", CONTEXT_PATCHES - 1}
+    assert set(results.keys()) == expected_poolings, (
+        f"Expected pooling modes {expected_poolings}, got {set(results.keys())}"
     )
     all_known_features = set(REGRESSION_FEATURES) | set(BINARY_FEATURES) | set(CLASSIFICATION_FEATURES)
     expected_layers = {-1} | set(range(_TINY["num_layers"]))
     for pooling, feat_dict in results.items():
-        # result only contains features that exist in the dataset (a subset of all known)
         assert set(feat_dict.keys()) <= all_known_features, (
             f"[{pooling}] Unknown features returned: {set(feat_dict.keys()) - all_known_features}"
         )
@@ -174,7 +176,8 @@ def test_run_probes_for_model_moiraic(module_c, tiny_dataset):
     n = len(tiny_dataset["series"])
     idx = np.arange(n)
     results = run_probes_for_model(module_c, tiny_dataset, idx[:80], idx[80:], batch_size=8)
-    assert set(results.keys()) == {"mean_ctx", "last_ctx"}
+    expected_poolings = {"mean_ctx", CONTEXT_PATCHES - 1}
+    assert set(results.keys()) == expected_poolings
     all_known_features = set(REGRESSION_FEATURES) | set(BINARY_FEATURES) | set(CLASSIFICATION_FEATURES)
     for pooling_dict in results.values():
         assert set(pooling_dict.keys()) <= all_known_features
@@ -211,7 +214,8 @@ def test_pr0_compat_run_probes_accepts_wrapped_dataset(module_e):
     results = run_probes_for_model(module_e, wrapped, idx[:80], idx[80:], batch_size=8)
 
     # results is now {pooling_mode: {feature: {layer: score}}}
-    assert set(results.keys()) == {"mean_ctx", "last_ctx"}
+    expected_poolings = {"mean_ctx", CONTEXT_PATCHES - 1}
+    assert set(results.keys()) == expected_poolings
     expected_layers = {-1} | set(range(_TINY["num_layers"]))
     for pooling, feat_dict in results.items():
         for feature, layer_scores in feat_dict.items():
@@ -374,34 +378,35 @@ def test_layer0_included_in_activations(module_e, series):
     )
 
 
-def test_last_ctx_matches_position_31(module_e, series):
-    """extract_activations(..., pooling='last_ctx')[layer] equals per_patch[layer][:, -1, :] for all layers."""
-    last_acts = extract_activations(module_e, series, batch_size=4, pooling="last_ctx")
+def test_int_pooling_matches_per_patch_position(module_e, series):
+    """extract_activations(..., pooling=k)[layer] equals per_patch[layer][:, k, :] for all layers."""
+    k = CONTEXT_PATCHES - 1
+    pos_acts = extract_activations(module_e, series, batch_size=4, pooling=k)
     per_patch_acts = extract_activations_per_patch(module_e, series, batch_size=4)
 
-    for layer_idx in sorted(last_acts.keys()):
-        expected = per_patch_acts[layer_idx][:, CONTEXT_PATCHES - 1, :]
-        actual = last_acts[layer_idx]
+    for layer_idx in sorted(pos_acts.keys()):
+        expected = per_patch_acts[layer_idx][:, k, :]
+        actual = pos_acts[layer_idx]
         assert np.array_equal(actual, expected), (
-            f"Layer {layer_idx}: last_ctx not bit-exact with per_patch[:, {CONTEXT_PATCHES - 1}, :]"
+            f"Layer {layer_idx}: pooling={k} not bit-exact with per_patch[:, {k}, :]"
         )
 
 
-def test_mean_ctx_and_last_ctx_shapes(module_e, series):
-    """Both pooling modes return [n, d_model] per layer including layer -1."""
+def test_mean_ctx_and_int_pooling_shapes(module_e, series):
+    """Both mean_ctx and integer-index pooling return [n, d_model] per layer including layer -1."""
     mean_acts = extract_activations(module_e, series, batch_size=4, pooling="mean_ctx")
-    last_acts = extract_activations(module_e, series, batch_size=4, pooling="last_ctx")
+    pos_acts = extract_activations(module_e, series, batch_size=4, pooling=CONTEXT_PATCHES - 1)
 
     expected_keys = {-1} | set(range(_TINY["num_layers"]))
     assert set(mean_acts.keys()) == expected_keys
-    assert set(last_acts.keys()) == expected_keys
+    assert set(pos_acts.keys()) == expected_keys
 
     for layer_idx in expected_keys:
         assert mean_acts[layer_idx].shape == (N, _TINY["d_model"]), (
             f"mean_ctx layer {layer_idx}: expected ({N}, {_TINY['d_model']}), got {mean_acts[layer_idx].shape}"
         )
-        assert last_acts[layer_idx].shape == (N, _TINY["d_model"]), (
-            f"last_ctx layer {layer_idx}: expected ({N}, {_TINY['d_model']}), got {last_acts[layer_idx].shape}"
+        assert pos_acts[layer_idx].shape == (N, _TINY["d_model"]), (
+            f"pos_{CONTEXT_PATCHES-1} layer {layer_idx}: expected ({N}, {_TINY['d_model']}), got {pos_acts[layer_idx].shape}"
         )
 
 
@@ -420,7 +425,8 @@ def test_nan_masking_no_crash(module_e, composite_dataset):
     idx = np.arange(n)
     results = run_probes_for_model(module_e, composite_dataset, idx[:160], idx[160:], batch_size=8)
 
-    assert set(results.keys()) == {"mean_ctx", "last_ctx"}
+    expected_poolings = {"mean_ctx", CONTEXT_PATCHES - 1}
+    assert set(results.keys()) == expected_poolings
     present_reg = [f for f in REGRESSION_FEATURES if f in composite_dataset]
     for pooling, feat_dict in results.items():
         for feat in present_reg:

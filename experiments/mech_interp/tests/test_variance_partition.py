@@ -167,7 +167,7 @@ def test_combined_r2_better_when_neural_informative():
     }
 
     # Compute targets to know what "fc_std" will be so we can build informative neural acts.
-    from experiments.mech_interp.block1_probing.train_probes_forecast import compute_forecast_targets
+    from experiments.mech_interp.block1_probing.forecast_runner import compute_forecast_targets
     targets = compute_forecast_targets(ro, ctx_period=24)
     # Use fc_std as the informative signal: neural layer_0 ≈ fc_std broadcast to d_model
     fc_std_signal = targets["fc_std"].astype(np.float32)  # [n]

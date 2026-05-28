@@ -1,24 +1,29 @@
-"""Tests for train_probes_forecast.py — PR-14.
+"""Tests for forecast probe targets and training via the consolidated API.
 
-All tests use tiny in-memory fixture data (n=40, d_model=64, layers={-1,0,1}).
-No model forward passes or real checkpoints required.
+Replaces the old train_probes_forecast tests. compute_forecast_targets now
+lives in forecast_runner; probe training uses fit_probe from probe_utils.
 """
 from __future__ import annotations
 
 import json
+import sys
+from unittest.mock import patch
 
 import numpy as np
 import pytest
 
+from experiments.mech_interp.block1_probing.train_probes import (
+    FORECAST_REGRESSION_FEATURES,
+    FORECAST_BINARY_FEATURES,
+)
+
+ALL_FORECAST_FEATURES = FORECAST_REGRESSION_FEATURES + FORECAST_BINARY_FEATURES
+
 
 def _make_runner_output(n: int = 40, d_model: int = 64, seed: int = 0) -> dict[str, np.ndarray]:
-    """Build a dict matching the structure of a forecast_runner .npz file."""
     rng = np.random.default_rng(seed)
-
-    # Quantile forecasts: enforce monotonicity across the Q axis so iqr >= 0.
     raw = rng.standard_normal((n, 9, 64)).astype(np.float32)
     fq = np.sort(raw, axis=1)
-
     out = {
         "forecast_quantiles": fq,
         "target": rng.standard_normal((n, 64)).astype(np.float32),
@@ -31,7 +36,7 @@ def _make_runner_output(n: int = 40, d_model: int = 64, seed: int = 0) -> dict[s
 
 
 @pytest.fixture
-def tiny_runner_output() -> dict[str, np.ndarray]:
+def tiny_runner_output():
     return _make_runner_output(n=60, d_model=64)
 
 
@@ -41,26 +46,21 @@ def tiny_split(tiny_runner_output):
     rng = np.random.default_rng(0)
     idx = rng.permutation(n)
     n_train = int(n * 0.8)
-    return idx[:n_train], idx[n_train:]   # 48 train / 12 val
+    return idx[:n_train], idx[n_train:]
 
 
 def test_compute_forecast_targets_shapes(tiny_runner_output):
-    from experiments.mech_interp.block1_probing.train_probes_forecast import (
-        compute_forecast_targets,
-        ALL_FORECAST_FEATURES,
-    )
+    from experiments.mech_interp.block1_probing.forecast_runner import compute_forecast_targets
 
     targets = compute_forecast_targets(tiny_runner_output, ctx_period=24)
-
     n = len(tiny_runner_output["forecast_quantiles"])
+
     assert set(targets.keys()) == set(ALL_FORECAST_FEATURES), (
         f"Missing keys: {set(ALL_FORECAST_FEATURES) - set(targets.keys())}"
     )
     for k, arr in targets.items():
         assert arr.shape == (n,), f"{k}: expected ({n},), got {arr.shape}"
 
-    # Binary labels must be int32 and exactly half ones (strict median split)
-    n = len(tiny_runner_output["forecast_quantiles"])
     for bl in ("is_flat", "is_poor"):
         assert targets[bl].dtype == np.int32, f"{bl} dtype: {targets[bl].dtype}"
         assert targets[bl].sum() == n // 2, (
@@ -68,67 +68,81 @@ def test_compute_forecast_targets_shapes(tiny_runner_output):
         )
 
 
-def test_run_forecast_probes_output_structure(tiny_runner_output, tiny_split):
-    from experiments.mech_interp.block1_probing.train_probes_forecast import (
-        run_forecast_probes,
-        ALL_FORECAST_FEATURES,
+def test_forecast_probe_training_finite(tiny_runner_output, tiny_split):
+    """Probe training on forecast targets returns finite scores."""
+    import math
+    from experiments.mech_interp.block1_probing.forecast_runner import (
+        compute_forecast_targets,
+        _parse_layer_indices,
     )
+    from experiments.mech_interp.block1_probing.probe_utils import fit_probe
 
     train_idx, val_idx = tiny_split
-    results = run_forecast_probes(tiny_runner_output, train_idx, val_idx, ctx_period=24)
+    targets = compute_forecast_targets(tiny_runner_output, ctx_period=24)
+    layer_indices = _parse_layer_indices(tiny_runner_output)
 
-    assert set(results.keys()) == {"mean_ctx", "last_ctx"}
-    for pooling, feat_dict in results.items():
-        for feature in ALL_FORECAST_FEATURES:
-            assert feature in feat_dict, f"[{pooling}] missing feature: {feature}"
-            layer_scores = feat_dict[feature]
-            assert set(layer_scores.keys()) == {-1, 0, 1}, (
-                f"[{pooling}][{feature}] unexpected layer keys: {set(layer_scores.keys())}"
-            )
-            for layer_idx, score in layer_scores.items():
-                assert np.isfinite(score), (
-                    f"[{pooling}][{feature}][{layer_idx}] non-finite score: {score}"
+    for pooling_suffix in ("mean_ctx", "last_ctx"):
+        for feature in FORECAST_REGRESSION_FEATURES[:2]:  # spot-check two features
+            y = targets[feature]
+            tr_mask = np.isfinite(y[train_idx])
+            va_mask = np.isfinite(y[val_idx])
+            if tr_mask.sum() < 5 or va_mask.sum() < 5:
+                continue
+            for layer_idx in layer_indices[:2]:  # spot-check two layers
+                X = tiny_runner_output[f"activations_{pooling_suffix}_layer_{layer_idx}"]
+                score = fit_probe(
+                    X[train_idx][tr_mask],
+                    X[val_idx][va_mask],
+                    y[train_idx][tr_mask],
+                    y[val_idx][va_mask],
+                    "regression",
+                )
+                assert math.isfinite(score), (
+                    f"[{pooling_suffix}][{feature}][{layer_idx}] non-finite score: {score}"
                 )
 
 
-def test_end_to_end_file_output(tiny_runner_output, tmp_path):
-    """main() creates moiraie_synth.json with expected structure."""
-    import sys
-    from unittest.mock import patch
-
-    # Write the tiny runner output as a .npz file.
-    npz_path = tmp_path / "moiraie_synth.npz"
-    np.savez(str(npz_path), **tiny_runner_output)
-
-    out_dir = str(tmp_path / "out")
+def test_end_to_end_synth_forecast(tmp_path):
+    """main() with --dataset synth --forecast creates expected output files."""
+    rng = np.random.default_rng(0)
+    n = 9 * 20
+    fake_ds = {
+        "series": rng.standard_normal((n, 576)).astype(np.float32),
+        "slope": rng.standard_normal(n).astype(np.float32),
+        "log_noise_var": rng.standard_normal(n).astype(np.float32),
+        "phase_cos": rng.standard_normal(n).astype(np.float32),
+        "phase_sin": rng.standard_normal(n).astype(np.float32),
+        "level_magnitude": rng.standard_normal(n).astype(np.float32),
+        "level_time_norm": rng.standard_normal(n).astype(np.float32),
+        "ar_phi": rng.standard_normal(n).astype(np.float32),
+        "seasonal_amplitude": rng.standard_normal(n).astype(np.float32),
+        "log_sigma_ratio": rng.standard_normal(n).astype(np.float32),
+        "var_shift_time_norm": rng.standard_normal(n).astype(np.float32),
+        "spike_present": rng.integers(0, 2, n).astype(np.float32),
+        "rw_present": rng.integers(0, 2, n).astype(np.float32),
+        "period_idx": rng.integers(0, 8, n).astype(np.int32),
+        "spike_patch_idx": rng.integers(-1, 32, n).astype(np.int32),
+    }
 
     argv = [
-        "train_probes_forecast",
-        "--npz-dir", str(tmp_path),
+        "train_probes",
         "--dataset", "synth",
+        "--pooling", "mean",
+        "--forecast",
         "--model", "moiraie",
-        "--output-dir", out_dir,
+        "--output-dir", str(tmp_path),
     ]
-    with patch.object(sys, "argv", argv):
-        from experiments.mech_interp.block1_probing import train_probes_forecast as tpf
-        tpf.main()
 
-    result_path = tmp_path / "out" / "moiraie_synth.json"
-    assert result_path.exists(), f"Expected {result_path} to exist"
+    import experiments.mech_interp.block1_probing.train_probes as tp
+    with (
+        patch("experiments.mech_interp.lib.generate_composite_dataset", return_value=fake_ds),
+        patch.object(sys, "argv", argv),
+    ):
+        tp.main()
 
-    with open(result_path) as f:
-        data = json.load(f)
-
-    assert "mean_ctx" in data, "Top-level key 'mean_ctx' missing"
-    assert "last_ctx" in data, "Top-level key 'last_ctx' missing"
-
-    # Spot-check a feature is present and has string layer keys.
-    mean_ctx = data["mean_ctx"]
-    assert "fc_std" in mean_ctx, "'fc_std' missing from mean_ctx"
-    layer_keys = list(mean_ctx["fc_std"].keys())
-    assert all(isinstance(k, str) for k in layer_keys), "Layer keys should be strings"
-    assert "-1" in layer_keys, "Layer -1 missing from fc_std results"
-
-    # metadata.json should also exist
-    meta_path = tmp_path / "out" / "metadata.json"
-    assert meta_path.exists(), "metadata.json not written"
+    assert (tmp_path / "moiraie.json").exists()
+    assert (tmp_path / "metadata.json").exists()
+    data = json.loads((tmp_path / "moiraie.json").read_text())
+    assert "mean_ctx" in data
+    # Forecast features should be present in the results
+    assert any(f in data["mean_ctx"] for f in FORECAST_REGRESSION_FEATURES + FORECAST_BINARY_FEATURES)

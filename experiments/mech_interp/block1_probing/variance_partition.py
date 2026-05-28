@@ -27,12 +27,12 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
-from experiments.mech_interp.block1_probing.forecast_runner import load_runner_output
-from experiments.mech_interp.block1_probing.train_probes_forecast import (
+from experiments.mech_interp.block1_probing.forecast_runner import (
+    load_runner_output,
     compute_forecast_targets,
     _parse_layer_indices,
 )
-from experiments.mech_interp.block1_probing.train_probes import fit_probe
+from experiments.mech_interp.block1_probing.probe_utils import fit_probe
 from experiments.mech_interp.lib.pseudo_labels import (
     context_std as _ctx_std,
     context_acf_lag1 as _ctx_acf,

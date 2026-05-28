@@ -33,7 +33,7 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 from experiments.mech_interp.lib.synthetic import generate_composite_dataset, split_dataset
-from experiments.mech_interp.block1_probing.train_probes import (
+from experiments.mech_interp.block1_probing.probe_utils import (
     PATCH_SIZE,
     CONTEXT_PATCHES,
     PRED_PATCHES,

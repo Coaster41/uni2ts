@@ -5,9 +5,10 @@ import numpy as np
 from experiments.mech_interp.lib.metrics import mase as _mase
 from experiments.mech_interp.lib.metrics import scaled_weighted_quantile_loss as _swql
 
+from experiments.mech_interp.block1_probing.probe_utils import HORIZON
+
 QUANTILE_LEVELS = np.array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
 _MEDIAN_IDX = 4  # q=0.5 is at index 4 in QUANTILE_LEVELS
-HORIZON = 64     # 4 pred patches * 16
 
 
 def fc_std(forecast_quantiles: np.ndarray) -> float:
