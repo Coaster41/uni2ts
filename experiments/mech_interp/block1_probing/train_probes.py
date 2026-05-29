@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import sys
 import warnings
@@ -110,7 +111,24 @@ PATCH_REGRESSION_FEATURES = [
     "patch_mean", "patch_std", "patch_slope", "patch_range",
     "patch_acf1", "patch_net_change",
     "patch_mean_dev", "patch_logstd_ratio", "patch_mean_rank",
+    # Group E — within-patch shape
+    "patch_curvature_coef", "patch_spearman_trend",
+    "patch_argmax_pos", "patch_n_sign_changes",
+    # Group G — cross-patch boundary (NaN at edge positions)
+    "patch_boundary_jump_left", "patch_boundary_jump_right", "patch_local_curvature_3",
 ]
+
+# Causal class for the new per-patch features (notebook grouping). #1 past_only,
+# #2/#3 future, #4-#7 within_patch.
+PATCH_CAUSAL_CLASS = {
+    "patch_boundary_jump_left":  "past_only",
+    "patch_boundary_jump_right": "future",
+    "patch_local_curvature_3":   "future",
+    "patch_curvature_coef":      "within_patch",
+    "patch_spearman_trend":      "within_patch",
+    "patch_argmax_pos":          "within_patch",
+    "patch_n_sign_changes":      "within_patch",
+}
 PATCH_BINARY_FEATURES = [
     "patch_is_level_outlier", "patch_has_pointspike",          # data-driven (any data)
     "patch_has_spike", "patch_has_levelshift",                 # ground-truth (synth only)
@@ -121,6 +139,16 @@ PATCH_BINARY_FEATURES = [
 # ---------------------------------------------------------------------------
 # Shared probe helpers
 # ---------------------------------------------------------------------------
+
+def _nanmax_vals(scores: dict[str, float]) -> float:
+    """Max over per-patch scores ignoring NaN (e.g. boundary positions); NaN if all NaN.
+
+    Plain ``max`` sticks on NaN when it is the first value (the k=0 boundary column of
+    the cross-patch features), so use this for log summaries only.
+    """
+    finite = [v for v in scores.values() if not math.isnan(v)]
+    return max(finite) if finite else float("nan")
+
 
 def _make_mask(
     y_tr: np.ndarray, y_va: np.ndarray, feat: str
@@ -846,7 +874,7 @@ def _run_per_patch_probes_universal(
         for feat, patch_scores in layer_scores.items():
             results[feat][str(layer_idx)] = patch_scores
 
-        best_by_feat = {f: max(results[f][str(layer_idx)].values()) for f in y_specs}
+        best_by_feat = {f: _nanmax_vals(results[f][str(layer_idx)]) for f in layer_scores}
         print(f"    Layer {layer_idx}: best patch — " + ", ".join(f"{f}={v:.3f}" for f, v in best_by_feat.items()))
 
     return results
@@ -924,7 +952,7 @@ def _run_patch_feature_probes(
                         auroc[str(p)] = float("nan")
             results[f][str(layer_idx)] = auroc
 
-        best = {f: max(results[f][str(layer_idx)].values()) for f in reg}
+        best = {f: _nanmax_vals(results[f][str(layer_idx)]) for f in reg}
         print(f"    Layer {layer_idx}: best patch R² — "
               + ", ".join(f"{f}={v:.3f}" for f, v in best.items()))
 
@@ -963,6 +991,8 @@ def _build_metadata(
     for f, ftype in all_feats:
         if ftype == "regression":
             feat_meta[f] = {"type": "regression", "baseline": 0.0, "metric": "R²"}
+            if f in PATCH_CAUSAL_CLASS:
+                feat_meta[f]["causal_class"] = PATCH_CAUSAL_CLASS[f]
         elif ftype == "binary":
             feat_meta[f] = {"type": "binary", **bin_meta.get(f, {"metric": "AUROC", "baseline": 0.5})}
         elif ftype == "classification":

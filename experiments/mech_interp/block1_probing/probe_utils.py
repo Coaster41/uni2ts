@@ -125,11 +125,15 @@ def fit_probes(
             for ki, (feat, _) in enumerate(clean_items):
                 results[feat] = {str(p): float(r2[p, ki]) for p in range(B)}
 
+        B = X_tr.shape[0]
         for feat, s in nan_items:
             y_tr_f, y_va_f = s[0], s[1]
             mask_tr = np.isfinite(y_tr_f)
             mask_va = np.isfinite(y_va_f)
             if mask_tr.sum() < min_samples or mask_va.sum() < min_samples:
+                # Too few finite labels to fit: emit NaN per patch rather than dropping
+                # the feature, so every regression feature is always returned.
+                results[feat] = {str(p): float("nan") for p in range(B)}
                 continue
             Y_tr_f = torch.from_numpy(y_tr_f[mask_tr, None].astype(np.float32))
             Y_va_f = torch.from_numpy(y_va_f[mask_va, None].astype(np.float32))
@@ -355,8 +359,19 @@ def batched_ridge_per_patch_local(
     X_train/X_val : [B, n, d] / [B, m, d]   (B = patch positions)
     Y_train/Y_val : [B, n, k] / [B, m, k]
     Returns r2 : [B, k] clamped to [-1, ∞).
+
+    Positions whose target column is all-NaN (e.g. boundary patches for the
+    cross-patch features) are skipped and reported as NaN — mirroring the
+    per-position guard on the binary path.
     """
+    # All-NaN (position, feature) slices: skip the ridge fit and emit NaN.
+    nan_mask = torch.isnan(Y_train).all(dim=1)            # [B, k]
+    Y_train = torch.nan_to_num(Y_train)
+    Y_val = torch.nan_to_num(Y_val)
+
     y_val_hat = _batched_ridge_predict_local(X_train, X_val, Y_train, alphas)
     ss_res = (Y_val - y_val_hat).pow(2).sum(dim=1)
     ss_tot = (Y_val - Y_val.mean(1, keepdim=True)).pow(2).sum(dim=1).clamp(min=1e-8)
-    return (1 - ss_res / ss_tot).clamp(min=-1.0)
+    r2 = (1 - ss_res / ss_tot).clamp(min=-1.0)
+    r2[nan_mask] = float("nan")
+    return r2

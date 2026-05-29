@@ -10,6 +10,8 @@ Groups:
     B  relative           — patch-vs-series level/volatility/rank               (any data)
     C  anomaly flags (gt) — spike/level/var-shift location from synth metadata  (synth only)
     D  anomaly flags (dd) — data-driven level-outlier / point-spike             (any data)
+    E  within-patch shape — curvature/spearman-trend/argmax-pos/sign-changes    (any data)
+    G  cross-patch        — boundary jumps L/R + 3-point curvature (NaN at edges)(any data)
 """
 from __future__ import annotations
 
@@ -60,6 +62,64 @@ def _group_relative(patches: np.ndarray) -> dict[str, np.ndarray]:
         "patch_mean_dev": (pm - g_mean) / (g_std + _EPS),
         "patch_logstd_ratio": np.log((pstd + _EPS) / (g_std + _EPS)),
         "patch_mean_rank": rank,
+    }
+
+
+def _group_within_patch(patches: np.ndarray) -> dict[str, np.ndarray]:
+    """Group E — within-patch shape descriptors. patches: [n, C, P]."""
+    P = patches.shape[2]
+
+    # Quadratic curvature coefficient `a` via a fixed design-matrix pseudoinverse,
+    # so it is a linear projection of the patch values.
+    u = np.linspace(-1.0, 1.0, P)
+    M = np.stack([u**2, u, np.ones(P)], axis=1)          # [P, 3]
+    pinv0 = np.linalg.pinv(M)[0]                          # [P] -> recovers `a`
+    curvature_coef = patches @ pinv0                      # [n, C]
+
+    # Spearman trend: rank patch values along the patch axis, Pearson vs time index.
+    ranks = patches.argsort(axis=2).argsort(axis=2).astype(np.float64)
+    t = np.arange(P, dtype=np.float64)
+    t_c = t - t.mean()
+    r_c = ranks - ranks.mean(axis=2, keepdims=True)
+    num = (r_c * t_c).sum(axis=2)
+    den = np.sqrt((r_c**2).sum(axis=2) * (t_c**2).sum())
+    spearman_trend = np.where(den > _EPS, num / (den + _EPS), 0.0)
+
+    argmax_pos = patches.argmax(axis=2).astype(np.float64) / (P - 1)
+
+    s = np.sign(np.diff(patches, axis=2))
+    n_sign_changes = (s[:, :, :-1] * s[:, :, 1:] < 0).sum(axis=2) / (P - 2)
+
+    return {
+        "patch_curvature_coef": curvature_coef,
+        "patch_spearman_trend": spearman_trend,
+        "patch_argmax_pos": argmax_pos,
+        "patch_n_sign_changes": n_sign_changes.astype(np.float64),
+    }
+
+
+def _group_cross_patch(pm: np.ndarray) -> dict[str, np.ndarray]:
+    """Group G — cross-patch boundary features from per-patch means. pm: [n, C].
+
+    Boundary columns (where a neighbouring patch does not exist) are set to NaN for
+    every sample; all interior columns are fully finite.
+    """
+    n, C = pm.shape
+    diff = pm[:, 1:] - pm[:, :-1]                          # m[k] - m[k-1], length C-1
+
+    jump_left = np.full((n, C), np.nan, dtype=np.float64)
+    jump_left[:, 1:] = diff                                # column 0 stays NaN
+
+    jump_right = np.full((n, C), np.nan, dtype=np.float64)
+    jump_right[:, :-1] = diff                              # column C-1 stays NaN
+
+    curvature_3 = np.full((n, C), np.nan, dtype=np.float64)
+    curvature_3[:, 1:-1] = pm[:, :-2] - 2 * pm[:, 1:-1] + pm[:, 2:]  # columns 0, C-1 NaN
+
+    return {
+        "patch_boundary_jump_left": jump_left,
+        "patch_boundary_jump_right": jump_right,
+        "patch_local_curvature_3": curvature_3,
     }
 
 
@@ -142,6 +202,8 @@ def compute_patch_features(
     patches = _patchify(stat_series, context_patches, patch_size)
 
     reg = {**_group_local_stats(patches), **_group_relative(patches)}
+    reg.update(_group_within_patch(patches))
+    reg.update(_group_cross_patch(reg["patch_mean"]))   # reuse computed per-patch mean
 
     bin_labels = _group_anomaly_dd(patches, z_level, z_spike)
     if all(k in dataset for k in ("spike_patch_idx", "level_time_norm", "var_shift_time_norm")):
