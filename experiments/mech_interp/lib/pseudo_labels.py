@@ -189,6 +189,7 @@ PSEUDO_LABEL_FUNCTIONS: dict[str, callable] = {
     "hurst_exponent": hurst_exponent,
     "sample_entropy": sample_entropy,
     "n_changepoints": n_changepoints,
-    "context_std": context_std,
+    # context_std omitted: PackedStdScaler normalizes the context to std≈1 before
+    # the transformer forward pass, so this label is always ~1 in the model's view.
     "context_acf_lag1": context_acf_lag1,
 }

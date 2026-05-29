@@ -2,6 +2,22 @@ import numpy as np
 import torch
 
 
+def normalize_for_model(
+    series: np.ndarray,
+    context_patches: int,
+    patch_size: int,
+) -> np.ndarray:
+    """Apply the same per-series normalization as PackedStdScaler.
+
+    Replicates: loc = mean(ctx), scale = std(ctx) + 1e-5 (minimum_scale),
+    normalized = (series - loc) / scale, where ctx is the context window only.
+    """
+    ctx_len = context_patches * patch_size
+    loc = series[:, :ctx_len].mean(axis=1, keepdims=True)
+    scale = np.maximum(series[:, :ctx_len].std(axis=1, keepdims=True), 1e-5)
+    return (series - loc) / scale
+
+
 def make_batch(
     series: np.ndarray,
     patch_size: int,

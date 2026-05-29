@@ -120,16 +120,26 @@ def compute_patch_features(
     patch_size: int = 16,
     z_level: float = 2.5,
     z_spike: float = 4.0,
+    normalized_series: np.ndarray | None = None,
 ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
     """Compute per-patch local labels.
 
     Returns ``(reg_labels, bin_labels)`` where every value is ``float64[n, context_patches]``.
     Group C (ground-truth anomaly flags) is included only when the synth metadata keys
     (``spike_patch_idx``, ``level_time_norm``, ``var_shift_time_norm``) are present.
+
+    Parameters
+    ----------
+    normalized_series : optional float32 [n, T]
+        Model-normalized version of ``dataset["series"]`` (same normalization as
+        PackedStdScaler). When provided, groups A and B (local stats, relative) are
+        computed from this instead of the raw series, matching what the model sees.
+        Groups C and D (anomaly flags) always use the raw series.
     """
     series = dataset["series"]
     n, T = series.shape
-    patches = _patchify(series, context_patches, patch_size)
+    stat_series = normalized_series if normalized_series is not None else series
+    patches = _patchify(stat_series, context_patches, patch_size)
 
     reg = {**_group_local_stats(patches), **_group_relative(patches)}
 

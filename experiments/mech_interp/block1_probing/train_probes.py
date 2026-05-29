@@ -72,7 +72,7 @@ REAL_REGRESSION_FEATURES = [
     "hurst_exponent",
     "sample_entropy",
     "n_changepoints",
-    "context_std",
+    # context_std omitted: always ≈1 in the model's normalized view.
     "context_acf_lag1",
 ]
 REAL_CLASSIFICATION_FEATURES = ["dataset_id"]
@@ -132,6 +132,32 @@ def _make_mask(
         return y_tr >= 0, y_va >= 0
     else:
         return np.ones(len(y_tr), dtype=bool), np.ones(len(y_va), dtype=bool)
+
+
+# Scale-dependent synth labels and their normalization transforms.
+# After PackedStdScaler, the model sees series / context_std, so raw generative
+# parameters like slope and seasonal_amplitude must be expressed in the same units.
+_SYNTH_SCALE_TRANSFORMS: dict = {
+    "slope":              lambda v, s: v / s,
+    "seasonal_amplitude": lambda v, s: v / s,
+    "level_magnitude":    lambda v, s: v / s,
+    "log_noise_var":      lambda v, s: v - 2.0 * np.log(np.maximum(s, 1e-5)),
+}
+
+
+def _normalize_synth_scale_labels(
+    feature_data: dict[str, np.ndarray],
+    series: np.ndarray,
+) -> dict[str, np.ndarray]:
+    """Return feature_data with scale-dependent synth labels in normalized units."""
+    ctx_std = np.maximum(
+        series[:, : CONTEXT_PATCHES * PATCH_SIZE].std(axis=1), 1e-5
+    ).astype(np.float32)
+    result = dict(feature_data)
+    for feat, fn in _SYNTH_SCALE_TRANSFORMS.items():
+        if feat in result:
+            result[feat] = fn(result[feat].astype(np.float32), ctx_std)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +307,16 @@ def _compute_forecast_targets(
         derive_binary_labels,
     )
 
+    # Normalize to match the model's internal view. PackedStdScaler uses context
+    # mean/std; the forecast output is denormalized, so scale-dependent features
+    # (fc_std, fc_range, fc_iqr_mean, fc_iqr_slope) would reflect raw series scale
+    # rather than forecast spread. Bring everything to normalized space here.
+    ctx_loc = ctx_all.mean(axis=1, keepdims=True)                     # [n, 1]
+    ctx_scale = np.maximum(ctx_all.std(axis=1, keepdims=True), 1e-5)  # [n, 1]
+    fq_all = (fq_all - ctx_loc[:, None, :]) / ctx_scale[:, None, :]   # [n, 9, H]
+    tgt_all = (tgt_all - ctx_loc) / ctx_scale                         # [n, H]
+    ctx_all = (ctx_all - ctx_loc) / ctx_scale                         # [n, 512]
+
     n = len(fq_all)
     per_series_period = isinstance(ctx_period, np.ndarray)
 
@@ -328,6 +364,7 @@ def run_probes_for_model(
         + [(f, "binary")       for f in SYNTH_BINARY_FEATURES         if f in dataset]
         + [(f, "classification") for f in SYNTH_CLASSIFICATION_FEATURES if f in dataset]
     )
+    norm_dataset = _normalize_synth_scale_labels(dataset, series)
 
     results: dict = {}
     last_ctx_idx = context_patches - 1
@@ -351,8 +388,8 @@ def run_probes_for_model(
         # Build y_specs once per pooling (masks computed from train/val labels)
         y_specs: dict = {}
         for feature, ftype in all_features:
-            y_tr = dataset[feature][train_idx].ravel()
-            y_va = dataset[feature][val_idx].ravel()
+            y_tr = norm_dataset[feature][train_idx].ravel()
+            y_va = norm_dataset[feature][val_idx].ravel()
             mask_tr, mask_va = _make_mask(y_tr, y_va, feature)
             y_specs[feature] = (y_tr, y_va, mask_tr, mask_va, ftype)
 
@@ -388,6 +425,7 @@ def run_probes_per_patch(
     Returns {feature_name: {layer_idx: {patch_idx: score}}}
     """
     series = dataset["series"]
+    norm_dataset = _normalize_synth_scale_labels(dataset, series)
 
     print(f"  Extracting per-patch train activations ({len(train_idx)} examples)...")
     X_train_by_layer = extract_activations(
@@ -411,10 +449,10 @@ def run_probes_per_patch(
 
     if reg_features:
         Y_train_reg = torch.from_numpy(
-            np.stack([dataset[f][train_idx].ravel() for f in reg_features], axis=1).astype(np.float32)
+            np.stack([norm_dataset[f][train_idx].ravel() for f in reg_features], axis=1).astype(np.float32)
         )
         Y_val_reg = torch.from_numpy(
-            np.stack([dataset[f][val_idx].ravel() for f in reg_features], axis=1).astype(np.float32)
+            np.stack([norm_dataset[f][val_idx].ravel() for f in reg_features], axis=1).astype(np.float32)
         )
 
     if clf_features:
@@ -571,6 +609,8 @@ def _run_pooled_probes(
         module, series, batch_size, poolings, device,
         capture_forecast=with_forecast,
     )
+
+    feature_data = _normalize_synth_scale_labels(feature_data, series)
 
     if with_forecast:
         fc_targets = _compute_forecast_targets(fq_all, ctx_all, tgt_all, ctx_period)
@@ -776,6 +816,8 @@ def _run_per_patch_probes_universal(
     X_by_layer_pp = acts_map["per_patch"]  # {layer: [n, ctx, d]}
     layer_keys = sorted(X_by_layer_pp.keys())
 
+    feature_data = _normalize_synth_scale_labels(feature_data, series)
+
     if with_forecast:
         fc_targets = _compute_forecast_targets(fq_all, ctx_all, tgt_all, ctx_period)
         all_features = features + [(f, "regression") for f in FORECAST_REGRESSION_FEATURES]
@@ -829,9 +871,12 @@ def _run_patch_feature_probes(
     Returns {feature: {layer_str: {patch_str: score}}}
     """
     from sklearn.metrics import roc_auc_score
+    from experiments.mech_interp.lib import normalize_for_model
 
-    reg, binf = compute_patch_features(dataset, CONTEXT_PATCHES, PATCH_SIZE)
     series = dataset["series"]
+    norm_series = normalize_for_model(series, CONTEXT_PATCHES, PATCH_SIZE)
+    reg, binf = compute_patch_features(dataset, CONTEXT_PATCHES, PATCH_SIZE,
+                                       normalized_series=norm_series)
 
     print(f"  Extracting per-patch activations ({len(train_idx)}+{len(val_idx)} examples)...")
     acts = extract_activations(

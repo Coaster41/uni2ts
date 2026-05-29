@@ -1,5 +1,5 @@
 from .attn_extractor import AttentionExtractor
-from .batch_prep import make_batch
+from .batch_prep import make_batch, normalize_for_model
 from .residual_extractor import ResidualExtractor
 from .corruption import (
     corrupt_add_noise,
@@ -44,6 +44,7 @@ from .synthetic import (
 __all__ = [
     "AttentionExtractor",
     "make_batch",
+    "normalize_for_model",
     "generate_dataset",
     "generate_composite_dataset",
     "split_dataset",
