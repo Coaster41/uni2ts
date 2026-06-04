@@ -201,6 +201,45 @@ def overshoot(
 
 
 # ---------------------------------------------------------------------------
+# Family C — Style
+# ---------------------------------------------------------------------------
+
+def forecast_spike_rate(
+    median_fc: ndarray,   # [n, H]
+    meta: dict,
+    threshold: float = 0.3,
+) -> ndarray:
+    """
+    Fraction of period-length windows in the forecast that contain a spike.
+
+    Divides the H-step forecast into floor(H / P) non-overlapping windows of
+    length P (the ground-truth period). A window is "active" (contains a spike)
+    if its maximum exceeds `threshold`.
+
+    Bumps in family_c_intermittent peak at 1.0; threshold=0.3 cleanly separates
+    active windows from noise-only windows (base_noise_sigma=0.05).  For a
+    model that captures the true Bernoulli(p) process the expected return value
+    is p.
+
+    Returns rate [n] in [0, 1].
+    """
+    H = median_fc.shape[1]
+    periods = meta["period_ts"].astype(np.float64)
+    results = np.empty(len(median_fc), dtype=np.float32)
+
+    for i in range(len(median_fc)):
+        P = max(1, int(round(periods[i])))
+        n_windows = max(1, H // P)
+        spike_count = sum(
+            1 for w in range(n_windows)
+            if median_fc[i, w * P : (w + 1) * P].max() > threshold
+        )
+        results[i] = spike_count / n_windows
+
+    return results
+
+
+# ---------------------------------------------------------------------------
 # Aggregation helper
 # ---------------------------------------------------------------------------
 
