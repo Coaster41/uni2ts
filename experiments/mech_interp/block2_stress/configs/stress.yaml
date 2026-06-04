@@ -1,0 +1,24 @@
+seed: 0
+patch_len: 16
+context_patches: 16       # context = 256 time steps
+horizon_patches: 4        # horizon = 64 time steps
+n_per_level: 256
+
+output_dir: data/stress   # relative to block2_stress/
+
+family_a:
+  snr_levels: [20.0, 10.0, 5.0, 2.0, 1.0, 0.5, 0.2, 0.1, 0.05, 0.02]
+  period_bins: [7, 12, 16, 24, 32]    # period choices (time steps)
+  ar1_carrier: false                   # enable optional AR(1) aperiodic carrier
+
+family_b:
+  phi_levels: [-0.9, -0.7, -0.5, -0.3, -0.1, 0.1, 0.3, 0.5, 0.7, 0.9, 0.95]
+  phi_fixed_sigma: 0.2
+  outlier_deltas: [0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0]  # units of context std
+  triangle_period_bins: [16, 24, 32]
+
+family_c:
+  intermittent_p: [0.2, 0.5, 0.8]
+  rand_amp_var_levels: [0.1, 0.5, 1.5]  # Var(A) for lognormal cycle amplitude
+  bump_half_width_frac: 0.25             # half-sine bump width as fraction of period
+  base_noise_sigma: 0.05                 # low background noise for style families
