@@ -15,7 +15,7 @@ family_b:
   phi_levels: [-0.9, -0.7, -0.5, -0.3, -0.1, 0.1, 0.3, 0.5, 0.7, 0.9, 0.95]
   phi_fixed_sigma: 0.2
   outlier_deltas: [0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0]  # units of context std
-  triangle_period_bins: [16, 24, 32]
+  triangle_period_bins: [7, 10, 12, 16, 20, 24, 30, 31, 32, 48]
 
 family_c:
   intermittent_p: [0.2, 0.5, 0.8]

@@ -10,9 +10,9 @@ All series are stored as float32[n, T] where T = (context_patches + horizon_patc
 Ground-truth metadata is stored alongside each file.
 
 Usage (CLI):
-    python -m experiments.mech_interp.block2_stress.generators \\
-        --config experiments/mech_interp/block2_stress/configs/stress.yaml \\
-        --output-dir /tmp/stress_smoke/
+    python -m experiments.mech_interp.block2_stress.generators \
+        --config experiments/mech_interp/block2_stress/configs/stress.yaml \
+        --output-dir experiments/mech_interp/block2_stress/data/stress
 
 Programmatic:
     from experiments.mech_interp.block2_stress import generate_all, load_stress_dataset
