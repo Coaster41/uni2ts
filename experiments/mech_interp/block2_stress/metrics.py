@@ -45,6 +45,7 @@ def retention_trend(
     median_fc: ndarray,   # [n, H]
     meta: dict,
     cfg: dict,
+    clip: bool = True,
 ) -> ndarray:
     """
     Fit line to median forecast → recovered slope ĝ.
@@ -66,7 +67,10 @@ def retention_trend(
         g_hat = coeffs[0]  # recovered slope
         g_true = slope_signs[i] * g_true_mag
         R = g_hat / (g_true + 1e-12)  # avoid divide by zero
-        results[i] = float(np.clip(R, 0.0, None))
+        if clip:
+            results[i] = float(np.clip(R, 0.0, None))
+        else:
+            results[i] = float(R)
 
     return results
 
@@ -119,6 +123,26 @@ def persistence_alignment(
     norm_fh = np.linalg.norm(flat_hold, axis=1) + 1e-12
 
     return (dot / (norm_fc * norm_fh)).astype(np.float32)
+
+def normalized_roughness(
+    median_fc: ndarray,   # [n, H]
+    true_fc: ndarray,     # [n, H]
+) -> ndarray:
+    """
+    Roughness ratio: mean(|Δmedian_fc|) / mean(|Δtrue_fc|).
+
+    Δx_t = x_t - x_{t-1} for t = 1..H-1.
+    Values > 1 → forecast is rougher than ground truth; < 1 → smoother.
+    Returns ratio [n].
+    """
+    fc_deltas   = np.abs(np.diff(median_fc.astype(np.float64), axis=1))   # [n, H-1]
+    true_deltas = np.abs(np.diff(true_fc.astype(np.float64),   axis=1))   # [n, H-1]
+
+    fc_roughness   = fc_deltas.mean(axis=1)
+    true_roughness = true_deltas.mean(axis=1)
+
+    return (fc_roughness / (true_roughness + 1e-12)).astype(np.float32)
+
 
 
 def optimal_pa(meta: dict, cfg: dict) -> ndarray:
@@ -249,3 +273,14 @@ def aggregate_level(scores: ndarray) -> tuple[float, float, float]:
     q25 = float(np.nanpercentile(scores, 25))
     q75 = float(np.nanpercentile(scores, 75))
     return med, q25, q75
+
+
+def aggregate_by_period(
+    scores: ndarray,
+    meta: dict,
+) -> dict[int, tuple[float, float, float]]:
+    """Group per-series scores by period and return per-period (median, q25, q75).
+    Requires meta to contain 'period_ts'."""
+    periods = np.round(meta["period_ts"]).astype(int)
+    unique_periods = np.unique(periods)
+    return {int(P): aggregate_level(scores[periods == P]) for P in unique_periods}

@@ -75,16 +75,18 @@ def gen_a_periodic(
     Periodic carrier: x_t = sin(2π t/P + φ) + σ·ε_t.
 
     Signal power = 0.5 (unit-amplitude sine); σ = sqrt(0.5 / SNR).
-    P sampled uniformly from cfg.family_a.period_bins; φ ~ Uniform[0, 2π).
+    Each period in cfg.family_a.period_bins gets exactly n_per_level_per_period series.
+    φ ~ Uniform[0, 2π) per series.
     """
-    n = cfg["n_per_level"]
-    T = (cfg["context_patches"] + cfg["horizon_patches"]) * cfg["patch_len"]
+    n_per_period = cfg["n_per_level_per_period"]
     period_bins = cfg["family_a"]["period_bins"]
+    n = n_per_period * len(period_bins)
+    T = (cfg["context_patches"] + cfg["horizon_patches"]) * cfg["patch_len"]
     sigma = float(np.sqrt(0.5 / snr))
     t = np.arange(T, dtype=np.float32)
 
+    period_ts = np.repeat(period_bins, n_per_period).astype(np.float32)  # [n], balanced
     rngs = _make_rngs(n, cfg["seed"], "a_periodic", level_idx)
-    period_ts = np.array([r.choice(period_bins) for r in rngs], dtype=np.float32)
     phases = np.array([r.uniform(0.0, 2 * np.pi) for r in rngs], dtype=np.float32)
     noises = np.array([
         r.standard_normal(T).astype(np.float32) for r in rngs
@@ -113,7 +115,7 @@ def gen_a_trend(
     The trend has unit signal power over the window; σ = 1 / sqrt(SNR).
     sign and intercept are randomized per series.
     """
-    n = cfg["n_per_level"]
+    n = cfg["n_per_level_per_period"]
     T = (cfg["context_patches"] + cfg["horizon_patches"]) * cfg["patch_len"]
     sigma = float(1.0 / np.sqrt(snr))
     t = np.arange(T, dtype=np.float32)
@@ -144,7 +146,7 @@ def gen_a_white_noise(cfg: dict) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     Used as the SNR→0 no-structure endpoint. The varied sigma ensures
     instance normalization sees diverse scaling but structure is absent.
     """
-    n = cfg["n_per_level"]
+    n = cfg["n_per_level_per_period"]
     T = (cfg["context_patches"] + cfg["horizon_patches"]) * cfg["patch_len"]
 
     rngs = _make_rngs(n, cfg["seed"], "a_white_noise", 0)
@@ -174,21 +176,27 @@ def gen_b_phi(
     Records analytic optimal continuation: phi^k * x_{L-1} for k=1..H,
     where L = context_patches * patch_len and H = horizon_patches * patch_len.
     """
-    n = cfg["n_per_level"]
+    n = cfg["n_per_level_per_period"]
     T = (cfg["context_patches"] + cfg["horizon_patches"]) * cfg["patch_len"]
     ctx_len = cfg["context_patches"] * cfg["patch_len"]
     H = cfg["horizon_patches"] * cfg["patch_len"]
     sigma = cfg["family_b"]["phi_fixed_sigma"]
 
-    # component_ar1 takes phi_min/phi_max; fix both to phi to get a constant
-    # However, component_ar1 uses a shared rng. We need per-series seeds,
-    # so we implement directly here.
+    start_value      = float(cfg["family_b"].get("phi_start_value", 0.0))
+    start_noise      = float(cfg["family_b"].get("phi_start_noise_sigma", 0.0))
+    restart_prob     = float(cfg["family_b"].get("phi_restart_prob", 0.0))
+    restart_noise    = float(cfg["family_b"].get("phi_restart_noise_sigma", 0.0))
+
     rngs = _make_rngs(n, cfg["seed"], "b_phi", level_idx)
     series = np.zeros((n, T), dtype=np.float32)
     for i, rng in enumerate(rngs):
         eps = rng.standard_normal(T).astype(np.float32)
+        series[i, 0] = start_value + start_noise * float(rng.standard_normal())
         for t in range(1, T):
-            series[i, t] = phi * series[i, t - 1] + sigma * eps[t]
+            if restart_prob > 0.0 and rng.random() < restart_prob:
+                series[i, t] = start_value + restart_noise * float(rng.standard_normal())
+            else:
+                series[i, t] = phi * series[i, t - 1] + sigma * eps[t]
 
     x_origin = series[:, ctx_len - 1]  # last context value
     ks = np.arange(1, H + 1, dtype=np.float32)
@@ -212,7 +220,7 @@ def gen_b_outlier(
     Outlier delta-sweep: smooth AR(1) base (phi=0.3) + spike of size delta*context_std
     injected at the final context timestep (index ctx_len - 1).
     """
-    n = cfg["n_per_level"]
+    n = cfg["n_per_level_per_period"]
     T = (cfg["context_patches"] + cfg["horizon_patches"]) * cfg["patch_len"]
     ctx_len = cfg["context_patches"] * cfg["patch_len"]
     base_sigma = 0.1   # low-noise smooth base
@@ -252,7 +260,7 @@ def gen_b_triangle(
     The wave has unit amplitude. Low noise (sigma=0.05) added.
     meta includes apex_h: step within horizon where downward turn begins (0-indexed).
     """
-    n = cfg["n_per_level"]
+    n = cfg["n_per_level_per_period"]
     T = (cfg["context_patches"] + cfg["horizon_patches"]) * cfg["patch_len"]
     ctx_len = cfg["context_patches"] * cfg["patch_len"]
     H = cfg["horizon_patches"] * cfg["patch_len"]
@@ -310,20 +318,21 @@ def gen_c_intermittent(
     """
     Intermittent events: x_t = Σ_k b_k * bump(t - k*P) + ε_t.
     b_k ~ Bernoulli(p) per cycle; bump = half-sine over bump_half_width timesteps.
-    Period P sampled from family_a.period_bins.
+    Each period in cfg.family_a.period_bins gets exactly n_per_level_per_period series.
     """
-    n = cfg["n_per_level"]
-    T = (cfg["context_patches"] + cfg["horizon_patches"]) * cfg["patch_len"]
+    n_per_period = cfg["n_per_level_per_period"]
     period_bins = cfg["family_a"]["period_bins"]
+    n = n_per_period * len(period_bins)
+    T = (cfg["context_patches"] + cfg["horizon_patches"]) * cfg["patch_len"]
     half_width_frac = cfg["family_c"]["bump_half_width_frac"]
     noise_sigma = cfg["family_c"]["base_noise_sigma"]
 
+    all_period_ts = np.repeat(period_bins, n_per_period).astype(np.float32)  # [n], balanced
     rngs = _make_rngs(n, cfg["seed"], "c_intermittent", level_idx)
     series = np.zeros((n, T), dtype=np.float32)
-    all_period_ts = np.zeros(n, dtype=np.float32)
 
     for i, rng in enumerate(rngs):
-        P = int(rng.choice(period_bins))
+        P = int(all_period_ts[i])
         half_width = max(1, int(half_width_frac * P))
         bump_t = np.arange(half_width, dtype=np.float32)
         bump = np.sin(np.pi * bump_t / half_width).astype(np.float32)  # half-sine, peak=1
@@ -356,19 +365,20 @@ def gen_c_rand_amp(
     """
     Random-amplitude periodic: x_t = A_{k(t)} * sin(2π t/P) + ε_t.
     A_k ~ LogNormal(0, sqrt(var_level)) i.i.d. per cycle.
-    Period P sampled from family_a.period_bins.
+    Each period in cfg.family_a.period_bins gets exactly n_per_level_per_period series.
     """
-    n = cfg["n_per_level"]
-    T = (cfg["context_patches"] + cfg["horizon_patches"]) * cfg["patch_len"]
+    n_per_period = cfg["n_per_level_per_period"]
     period_bins = cfg["family_a"]["period_bins"]
+    n = n_per_period * len(period_bins)
+    T = (cfg["context_patches"] + cfg["horizon_patches"]) * cfg["patch_len"]
     noise_sigma = cfg["family_c"]["base_noise_sigma"]
 
+    all_period_ts = np.repeat(period_bins, n_per_period).astype(np.float32)  # [n], balanced
     rngs = _make_rngs(n, cfg["seed"], "c_rand_amp", level_idx)
     series = np.zeros((n, T), dtype=np.float32)
-    all_period_ts = np.zeros(n, dtype=np.float32)
 
     for i, rng in enumerate(rngs):
-        P = int(rng.choice(period_bins))
+        P = int(all_period_ts[i])
         n_cycles = T // P + 1
         # Draw one amplitude per cycle
         log_amps = rng.normal(0.0, float(np.sqrt(var_level)), size=n_cycles).astype(np.float32)
