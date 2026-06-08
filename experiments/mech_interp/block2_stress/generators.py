@@ -1,10 +1,12 @@
 """
 PR-1: Stress-test synthetic generators.
 
-Produces three families of controlled synthetic time series:
+Produces four families of controlled synthetic time series:
   Family A — Structure-commitment: SNR sweep with periodic and trend carriers + white-noise anchor
   Family B — Parroting: phi-sweep AR(1), outlier-delta sweep, triangle diagnostic
   Family C — Style: intermittent events, random-amplitude periodic
+  Family D — Periodic variations: sine/triangle base crossed with noise, trend, anomaly,
+             level-shift, amplitude-modulation, and phase-drift sweeps
 
 All series are stored as float32[n, T] where T = (context_patches + horizon_patches) * patch_len.
 Ground-truth metadata is stored alongside each file.
@@ -401,6 +403,261 @@ def gen_c_rand_amp(
 
 
 # ---------------------------------------------------------------------------
+# Family D — Periodic variations (sine / triangle × feature sweep)
+# ---------------------------------------------------------------------------
+
+def _periodic_carrier(
+    t: np.ndarray,
+    period_ts: np.ndarray,
+    offsets: np.ndarray,
+    wave_type: str,
+) -> np.ndarray:
+    """
+    Unit-amplitude carrier [n, T] float32.
+
+    Both wave types use a time-offset phase: offsets[i] ~ Uniform(0, period_ts[i]).
+    sine:     sin(2π * (t - offset) / P)
+    triangle: 1 - 4 * |((t - offset) mod P) / P - 0.5|
+    """
+    if wave_type == "sine":
+        angles = 2 * np.pi * (t[None, :] - offsets[:, None]) / period_ts[:, None]
+        return np.sin(angles).astype(np.float32)
+    else:  # triangle
+        n = len(period_ts)
+        result = np.empty((n, len(t)), dtype=np.float32)
+        for i in range(n):
+            t_shifted = (t - offsets[i]) % float(period_ts[i]) / float(period_ts[i])
+            result[i] = (1.0 - 4.0 * np.abs(t_shifted - 0.5)).astype(np.float32)
+        return result
+
+
+def _d_base(cfg: dict, wave_type: str, family_tag: str, level_idx: int):
+    """Shared setup for all family-D generators. Returns (n, T, ctx_len, period_ts, offsets, rngs, t)."""
+    n_per_period = cfg["n_per_level_per_period"]
+    period_bins = cfg["family_d"]["period_bins"]
+    n = n_per_period * len(period_bins)
+    T = (cfg["context_patches"] + cfg["horizon_patches"]) * cfg["patch_len"]
+    ctx_len = cfg["context_patches"] * cfg["patch_len"]
+    t = np.arange(T, dtype=np.float32)
+    period_ts = np.repeat(period_bins, n_per_period).astype(np.float32)
+    rngs = _make_rngs(n, cfg["seed"], family_tag, level_idx)
+    offsets = np.array(
+        [r.uniform(0.0, float(period_ts[i])) for i, r in enumerate(rngs)],
+        dtype=np.float32,
+    )
+    return n, T, ctx_len, period_ts, offsets, rngs, t
+
+
+def gen_d_noise(
+    cfg: dict,
+    wave_type: str,
+    snr: float,
+    level_idx: int,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """
+    Periodic + white noise.  carrier + σ·ε,  σ = sqrt(0.5 / snr).
+    """
+    n, T, _, period_ts, offsets, rngs, t = _d_base(cfg, wave_type, f"d_{wave_type}_noise", level_idx)
+    sigma = float(np.sqrt(0.5 / snr))
+    carrier = _periodic_carrier(t, period_ts, offsets, wave_type)
+    noises = np.array([r.standard_normal(T).astype(np.float32) for r in rngs])
+    series = (carrier + sigma * noises).astype(np.float32)
+    meta = {
+        "period_ts": period_ts,
+        "offset": offsets,
+        "sigma": np.full(n, sigma, dtype=np.float32),
+        "snr": np.full(n, snr, dtype=np.float32),
+    }
+    return series, meta
+
+
+def gen_d_trend(
+    cfg: dict,
+    wave_type: str,
+    trend_snr: float,
+    level_idx: int,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """
+    Periodic + linear trend.
+
+    trend_snr = (periodic power) / (trend power).
+    Periodic power = 0.5 (unit-amplitude sine).  Trend power over [-1,1] = 1/3.
+    trend_amplitude = sqrt(0.5 / trend_snr / (1/3)) = sqrt(1.5 / trend_snr).
+    """
+    n, T, _, period_ts, offsets, rngs, t = _d_base(cfg, wave_type, f"d_{wave_type}_trend", level_idx)
+    base_noise = cfg["family_d"]["base_noise_sigma"]
+    trend_amp = float(np.sqrt(1.5 / trend_snr))
+    t_norm = ((t - (T - 1) / 2.0) / ((T - 1) / 2.0)).astype(np.float32)  # [-1, 1]
+
+    carrier = _periodic_carrier(t, period_ts, offsets, wave_type)
+    signs = np.array([r.choice([-1.0, 1.0]) for r in rngs], dtype=np.float32)
+    noises = np.array([r.standard_normal(T).astype(np.float32) for r in rngs])
+    series = (carrier + signs[:, None] * t_norm[None, :] * trend_amp + base_noise * noises).astype(np.float32)
+    meta = {
+        "period_ts": period_ts,
+        "offset": offsets,
+        "trend_sign": signs,
+        "trend_amp": np.full(n, trend_amp, dtype=np.float32),
+        "trend_snr": np.full(n, trend_snr, dtype=np.float32),
+    }
+    return series, meta
+
+
+def gen_d_anomaly(
+    cfg: dict,
+    wave_type: str,
+    delta: float,
+    level_idx: int,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """
+    Periodic + point anomalies.
+
+    Injects cfg.family_d.anomaly_count spikes of magnitude ±delta (carrier-amplitude units)
+    at randomly chosen positions within the context window.
+    """
+    n, T, ctx_len, period_ts, offsets, rngs, t = _d_base(cfg, wave_type, f"d_{wave_type}_anomaly", level_idx)
+    base_noise = cfg["family_d"]["base_noise_sigma"]
+    anomaly_count = cfg["family_d"]["anomaly_count"]
+
+    carrier = _periodic_carrier(t, period_ts, offsets, wave_type)
+    noises = np.array([r.standard_normal(T).astype(np.float32) for r in rngs])
+    series = (carrier + base_noise * noises).astype(np.float32)
+
+    anomaly_times = np.zeros((n, anomaly_count), dtype=np.int32)
+    anomaly_mags = np.zeros((n, anomaly_count), dtype=np.float32)
+    for i, rng in enumerate(rngs):
+        times = rng.choice(ctx_len, size=anomaly_count, replace=False)
+        mags = rng.choice([-delta, delta], size=anomaly_count).astype(np.float32)
+        series[i, times] += mags
+        anomaly_times[i] = times
+        anomaly_mags[i] = mags
+
+    meta = {
+        "period_ts": period_ts,
+        "offset": offsets,
+        "anomaly_times": anomaly_times,
+        "anomaly_mags": anomaly_mags,
+        "delta": np.full(n, delta, dtype=np.float32),
+    }
+    return series, meta
+
+
+def gen_d_level_shift(
+    cfg: dict,
+    wave_type: str,
+    magnitude: float,
+    level_idx: int,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """
+    Periodic + sudden level shift.
+
+    A step of ±magnitude (carrier-amplitude units) is added at a random point
+    in the middle half of the context [ctx/4, 3*ctx/4) and persists to the end.
+    """
+    n, T, ctx_len, period_ts, offsets, rngs, t = _d_base(cfg, wave_type, f"d_{wave_type}_level_shift", level_idx)
+    base_noise = cfg["family_d"]["base_noise_sigma"]
+
+    carrier = _periodic_carrier(t, period_ts, offsets, wave_type)
+    noises = np.array([r.standard_normal(T).astype(np.float32) for r in rngs])
+    series = (carrier + base_noise * noises).astype(np.float32)
+
+    shift_times = np.zeros(n, dtype=np.int32)
+    shift_mags = np.zeros(n, dtype=np.float32)
+    lo, hi = ctx_len // 4, 3 * ctx_len // 4
+    for i, rng in enumerate(rngs):
+        shift_t = int(rng.integers(lo, hi))
+        mag = float(rng.choice([-magnitude, magnitude]))
+        series[i, shift_t:] += mag
+        shift_times[i] = shift_t
+        shift_mags[i] = mag
+
+    meta = {
+        "period_ts": period_ts,
+        "offset": offsets,
+        "shift_time": shift_times,
+        "shift_mag": shift_mags,
+        "magnitude": np.full(n, magnitude, dtype=np.float32),
+    }
+    return series, meta
+
+
+def gen_d_amp_mod(
+    cfg: dict,
+    wave_type: str,
+    rate: float,
+    level_idx: int,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """
+    Periodic × monotone amplitude envelope.
+
+    A(t) = 1 + rate * t/T, so amplitude grows linearly from 1 at t=0 to 1+rate at t=T-1.
+    Each series independently randomises whether it grows or decays.
+    """
+    n, T, _, period_ts, offsets, rngs, t = _d_base(cfg, wave_type, f"d_{wave_type}_amp_mod", level_idx)
+    base_noise = cfg["family_d"]["base_noise_sigma"]
+
+    carrier = _periodic_carrier(t, period_ts, offsets, wave_type)
+    noises = np.array([r.standard_normal(T).astype(np.float32) for r in rngs])
+    # sign of rate is randomised per series (growing vs decaying)
+    rate_signs = np.array([r.choice([-1.0, 1.0]) for r in rngs], dtype=np.float32)
+    amp_env = (1.0 + rate_signs[:, None] * rate * (t[None, :] / T)).astype(np.float32)
+    series = (carrier * amp_env + base_noise * noises).astype(np.float32)
+
+    meta = {
+        "period_ts": period_ts,
+        "offset": offsets,
+        "amp_mod_rate": np.full(n, rate, dtype=np.float32),
+        "amp_mod_sign": rate_signs,
+        "amp_start": np.ones(n, dtype=np.float32),
+        "amp_end": (1.0 + rate_signs * rate).astype(np.float32),
+    }
+    return series, meta
+
+
+def gen_d_phase_drift(
+    cfg: dict,
+    wave_type: str,
+    drift: float,
+    level_idx: int,
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """
+    Periodic with linear phase drift (chirp).
+
+    A linear frequency offset accumulates so that by t=T the carrier has drifted
+    by an extra `drift` full cycles relative to the base frequency.
+
+    sine:     sin(2π * (t - offset) / P + 2π * drift * t / T)
+    triangle: same time-domain shift: t_eff = t + drift * P * t / T
+    """
+    n, T, _, period_ts, offsets, rngs, t = _d_base(cfg, wave_type, f"d_{wave_type}_phase_drift", level_idx)
+    base_noise = cfg["family_d"]["base_noise_sigma"]
+    noises = np.array([r.standard_normal(T).astype(np.float32) for r in rngs])
+    # direction of drift randomised per series
+    drift_signs = np.array([r.choice([-1.0, 1.0]) for r in rngs], dtype=np.float32)
+
+    series = np.empty((n, T), dtype=np.float32)
+    if wave_type == "sine":
+        drift_phase = (2 * np.pi * drift * t / T).astype(np.float32)  # [T]
+        for i in range(n):
+            base_angle = 2 * np.pi * (t - offsets[i]) / float(period_ts[i])
+            series[i] = (np.sin(base_angle + drift_signs[i] * drift_phase) + base_noise * noises[i]).astype(np.float32)
+    else:  # triangle
+        for i in range(n):
+            P = float(period_ts[i])
+            t_eff = t + drift_signs[i] * drift * P * t / T
+            t_shifted = (t_eff - offsets[i]) % P / P
+            series[i] = (1.0 - 4.0 * np.abs(t_shifted - 0.5) + base_noise * noises[i]).astype(np.float32)
+
+    meta = {
+        "period_ts": period_ts,
+        "offset": offsets,
+        "phase_drift_rate": np.full(n, drift, dtype=np.float32),
+        "phase_drift_sign": drift_signs,
+    }
+    return series, meta
+
+
+# ---------------------------------------------------------------------------
 # generate_all / load_stress_dataset
 # ---------------------------------------------------------------------------
 
@@ -506,6 +763,37 @@ def generate_all(cfg_path: str, output_dir: str | None = None) -> None:
     for i, var in enumerate(cfg["family_c"]["rand_amp_var_levels"]):
         s, m = gen_c_rand_amp(cfg, var, i)
         _save_level("family_c_rand_amp", f"var_{i:02d}", s, m)
+
+    for wave_type in ("sine", "triangle"):
+        print(f"=== Family D — {wave_type} + noise ===")
+        for i, snr in enumerate(cfg["family_d"]["noise_snr_levels"]):
+            s, m = gen_d_noise(cfg, wave_type, snr, i)
+            _save_level(f"family_d_{wave_type}_noise", f"snr_{i:02d}", s, m)
+
+        print(f"=== Family D — {wave_type} + trend ===")
+        for i, snr in enumerate(cfg["family_d"]["trend_snr_levels"]):
+            s, m = gen_d_trend(cfg, wave_type, snr, i)
+            _save_level(f"family_d_{wave_type}_trend", f"snr_{i:02d}", s, m)
+
+        print(f"=== Family D — {wave_type} + anomaly ===")
+        for i, delta in enumerate(cfg["family_d"]["anomaly_deltas"]):
+            s, m = gen_d_anomaly(cfg, wave_type, delta, i)
+            _save_level(f"family_d_{wave_type}_anomaly", f"delta_{i:02d}", s, m)
+
+        print(f"=== Family D — {wave_type} + level shift ===")
+        for i, mag in enumerate(cfg["family_d"]["level_shift_magnitudes"]):
+            s, m = gen_d_level_shift(cfg, wave_type, mag, i)
+            _save_level(f"family_d_{wave_type}_level_shift", f"mag_{i:02d}", s, m)
+
+        print(f"=== Family D — {wave_type} + amp mod ===")
+        for i, rate in enumerate(cfg["family_d"]["amp_mod_rates"]):
+            s, m = gen_d_amp_mod(cfg, wave_type, rate, i)
+            _save_level(f"family_d_{wave_type}_amp_mod", f"rate_{i:02d}", s, m)
+
+        print(f"=== Family D — {wave_type} + phase drift ===")
+        for i, drift in enumerate(cfg["family_d"]["phase_drift_rates"]):
+            s, m = gen_d_phase_drift(cfg, wave_type, drift, i)
+            _save_level(f"family_d_{wave_type}_phase_drift", f"drift_{i:02d}", s, m)
 
     # Write index
     families = [e["family"] for e in index_entries]

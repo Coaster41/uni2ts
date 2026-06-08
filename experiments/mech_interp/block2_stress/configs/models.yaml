@@ -1,0 +1,38 @@
+# Model specs for the block2_stress forecast runner.
+#
+# Each entry under `models:` maps a model NAME (used as the output subdir under
+# data/forecasts/<NAME>/) to an adapter spec. `adapter` selects the registered
+# ForecastAdapter (see block2_stress/models/__init__.py); the remaining keys are
+# forwarded to that adapter's constructor.
+#
+# Per-model env / shared npz: run each model in whatever venv has its deps and
+# point all of them at the same --output-dir. Use --only NAME ... to select a
+# subset. Adapters import their backend lazily, so an env missing one package
+# can still run the others.
+models:
+  moiraie:
+    adapter: moiraie
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraie/gift_eval_pretrain_weighted/moiraie_training_7/HF_checkpoints/last
+  moiraic:
+    adapter: moiraic
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraic/gift_eval_pretrain_weighted/moiraic_training_11/HF_checkpoints/last
+  moirai2:
+    adapter: moirai2
+    model_path: Salesforce/moirai-2.0-R-small
+  chronos2:
+    adapter: chronos2
+    model_name: amazon/chronos-2
+  timesfm25:
+    adapter: timesfm25
+    # `checkpoint` is the HF repo id (or local dir) passed to from_pretrained;
+    # defaults to the 200M torch weights, which also moves the model to cuda:0.
+    # checkpoint: google/timesfm-2.5-200m-pytorch
+  patchtst_fm:
+    adapter: patchtst_fm
+    ckpt_path: ibm-granite/granite-timeseries-patchtst-fm-r1
+    # predictor_path: /path/to/granite-tsfm/notebooks/hfdemo/patchtst_fm
+    predictor_path: /srv/disk00/ctadler/granite-tsfm/notebooks/hfdemo/patchtst_fm
+  toto:
+    adapter: toto
+    model_id: Datadog/Toto-2.0-22m   # quantile-head Toto 2.0 (not sampling-based)
+    # decode_block_size: 768

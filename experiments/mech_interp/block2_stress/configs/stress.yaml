@@ -7,8 +7,8 @@ n_per_level_per_period: 256
 output_dir: data/stress   # relative to block2_stress/
 
 family_a:
-  snr_levels: [20.0, 10.0, 5.0, 2.0, 1.0, 0.5, 0.2, 0.1, 0.05, 0.02]
-  period_bins: [6, 7, 8, 10, 12, 15, 16, 20, 24, 28, 30, 32, 36, 40, 48]    # period choices (time steps)
+  snr_levels: [20.0]
+  period_bins: [7, 8, 16, 24, 32, 48]    # period choices (time steps)
   ar1_carrier: false                   # enable optional AR(1) aperiodic carrier
 
 family_b:
@@ -19,10 +19,22 @@ family_b:
   phi_restart_prob: 0.0        # per-step prob of resetting to start_value + noise
   phi_restart_noise_sigma: 0.5 # std of noise added to phi_start_value on restart
   outlier_deltas: [0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0]  # units of context std
-  triangle_period_bins: [6, 7, 8, 10, 12, 15, 16, 20, 24, 28, 30, 32, 36, 40, 48]
+  triangle_period_bins: [7, 8, 16, 24, 32, 48]
 
 family_c:
-  intermittent_p: [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
-  rand_amp_var_levels: [0.1, 0.5, 1.5]  # Var(A) for lognormal cycle amplitude
+  intermittent_p: [0.5]
+  rand_amp_var_levels: [0.5]  # Var(A) for lognormal cycle amplitude
   bump_half_width_frac: 0.5             # half-sine bump width as fraction of period
   base_noise_sigma: 0.05                 # low background noise for style families
+
+family_d:
+  period_bins: [7, 8, 16, 24, 32, 48]
+  base_noise_sigma: 0.02          # small background noise for "clean" base
+
+  noise_snr_levels: [1.0, 5.0, 20.0]          # ratio signal-power / noise-power
+  trend_snr_levels: [1.0, 5.0, 20.0]          # ratio periodic-power / trend-power
+  anomaly_deltas: [1.0, 2.0, 5.0, 10.0]       # spike size in carrier-amplitude units
+  anomaly_count: 5                             # spikes injected per series in context
+  level_shift_magnitudes: [0.5, 1.0, 2.0, 3.0]  # shift in carrier-amplitude units
+  amp_mod_rates: [0.25, 0.5, 1.0, 2.0]        # fractional amp change (1 -> 1+rate)
+  phase_drift_rates: [0.25, 0.5, 1.0, 2.0]    # extra cycles accumulated over window
