@@ -13,39 +13,19 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-from functools import partial
+"""Backward-compatible encoder preset of the unified :class:`MoiraiXModule`.
 
-import torch
-import torch.nn.functional as F
-from huggingface_hub import PyTorchModelHubMixin
-from jaxtyping import Bool, Float, Int
-from torch import nn
+``MoiraieModule`` pins the masked-reconstruction encoder configuration
+(``mask_inputs=True, predict_next=False``) and leaves ``causal`` configurable so
+both the bidirectional and the causal-encoder checkpoints load unchanged. Because
+``mask_inputs=True`` the ``mask_encoding`` parameter is created, matching the
+original encoder checkpoints' state-dict keys.
+"""
 
-from uni2ts.common.torch_util import (
-    mask_fill,
-    packed_attention_mask,
-    packed_causal_attention_mask,
-)
-from uni2ts.module.norm import RMSNorm
-from uni2ts.module.packed_scaler import PackedNOPScaler, PackedStdScaler
-from uni2ts.module.position import (
-    BinaryAttentionBias,
-    QueryKeyProjection,
-    RotaryProjection,
-)
-from uni2ts.module.transformer import TransformerEncoder
-from uni2ts.module.ts_embed import ResidualBlock
+from uni2ts.model.moiraix.module import MoiraiXModule
 
 
-class MoiraieModule(
-    nn.Module,
-    PyTorchModelHubMixin,
-):
-    """
-    Contains components of Moirai, to ensure implementation is identical across models.
-    Subclasses huggingface_hub.PyTorchModelHubMixin to support loading from HuggingFace Hub.
-    """
-
+class MoiraieModule(MoiraiXModule):
     def __init__(
         self,
         d_model: int,
@@ -60,143 +40,21 @@ class MoiraieModule(
         quantile_levels: tuple[float] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
         min_scale: float = 1e-5,
         causal: bool = False,
+        **kwargs,  # absorb/override any stale objective flags from old configs
     ):
-        """
-        :param d_model: model hidden dimensions
-        :param num_layers: number of transformer layers
-        :param patch_size: patch size
-        :param max_seq_len: maximum sequence length for inputs
-        :param attn_dropout_p: dropout probability for attention layers
-        :param dropout_p: dropout probability for all other layers
-        :param scaling: whether to apply scaling (standardization)
-        :param num_quantiles: number of quantile levels
-        :param min_scale: minimum scale for std scaler
-        """
-        super().__init__()
-        self.d_model = d_model
-        self.num_layers = num_layers
-        self.patch_size = patch_size
-        self.num_predict_token = num_predict_token
-        if self.num_predict_token != 1:
-            print(f"WARNING: num_predict_token should be 1 but is set to {self.num_predict_token}")
-        self.max_seq_len = max_seq_len
-        self.scaling = scaling
-        self.causal = causal
-        self.quantile_levels = quantile_levels
-        self.num_quantiles = len(quantile_levels)
-
-        self.mask_encoding = nn.Embedding(num_embeddings=1, embedding_dim=d_model)
-
-        self.scaler = PackedStdScaler(minimum_scale=min_scale) if scaling else PackedNOPScaler()
-        self.in_proj = ResidualBlock(
-            input_dims=patch_size * 2,
-            hidden_dims=d_model,
-            output_dims=d_model,
-        )
-        self.encoder = TransformerEncoder(
-            d_model,
-            num_layers,
-            num_heads=None,
-            pre_norm=True,
+        super().__init__(
+            d_model=d_model,
+            d_ff=d_ff,
+            num_layers=num_layers,
+            patch_size=patch_size,
+            max_seq_len=max_seq_len,
             attn_dropout_p=attn_dropout_p,
             dropout_p=dropout_p,
-            norm_layer=RMSNorm,
-            activation=F.silu,
-            use_glu=True,
-            use_qk_norm=True,
-            var_attn_bias_layer=partial(BinaryAttentionBias),
-            time_qk_proj_layer=partial(
-                QueryKeyProjection,
-                proj_layer=RotaryProjection,
-                kwargs=dict(max_len=max_seq_len),
-                partial_factor=(0.0, 0.5),
-            ),
-            shared_var_attn_bias=False,
-            shared_time_qk_proj=True,
-            d_ff=d_ff,
+            scaling=scaling,
+            num_predict_token=num_predict_token,
+            quantile_levels=quantile_levels,
+            min_scale=min_scale,
+            causal=causal,
+            mask_inputs=True,
+            predict_next=False,
         )
-        self.out_proj = ResidualBlock(
-            input_dims=d_model,
-            hidden_dims=d_model,
-            output_dims=num_predict_token * self.num_quantiles * patch_size,
-        )
-        self.get_reprs = False
-
-    def forward(
-        self,
-        target: Float[torch.Tensor, "*batch seq_len patch"],
-        observed_mask: Bool[torch.Tensor, "*batch seq_len patch"],
-        sample_id: Int[torch.Tensor, "*batch seq_len"],
-        time_id: Int[torch.Tensor, "*batch seq_len"],
-        variate_id: Int[torch.Tensor, "*batch seq_len"],
-        prediction_mask: Bool[torch.Tensor, "*batch seq_len"],
-        training_mode: Bool = True,
-        return_attn_weights: bool = False,
-    ):
-        """
-        Defines the forward pass of MoiraieecoderModule.
-        This method expects processed inputs.
-
-        1. Apply scaling to observations
-        2. Project from observations to representations
-        3. Replace prediction window with learnable mask
-        4. Apply transformer layers
-        5. Project from representations to distribution parameters
-        6. Return distribution object
-
-        :param target: input data
-        :param observed_mask: binary mask for missing values, 1 if observed, 0 otherwise
-        :param sample_id: indices indicating the sample index (for packing)
-        :param time_id: indices indicating the time index
-        :param variate_id: indices indicating the variate index
-        :param prediction_mask: binary mask for prediction horizon, 1 if part of the horizon, 0 otherwise
-        :param training_mode: whether to use training mode (inference mode)
-        :return: predictive distribution
-        """
-        loc, scale = self.scaler(
-            target,
-            observed_mask * ~prediction_mask.unsqueeze(-1),
-            sample_id,
-            variate_id,
-        )
-        scaled_target = (target - loc) / scale
-        input_tokens = torch.cat(
-            [scaled_target, observed_mask.to(torch.float32)], dim=-1
-        )
-        reprs = self.in_proj(input_tokens)
-
-        masked_reprs = mask_fill(reprs, prediction_mask, self.mask_encoding.weight)
-
-        attn_mask = (
-            packed_causal_attention_mask(sample_id, time_id)
-            if self.causal
-            else packed_attention_mask(sample_id)
-        )
-
-        if return_attn_weights:
-            reprs, all_attn_weights = self.encoder(
-                masked_reprs,
-                attn_mask,
-                time_id=time_id,
-                var_id=variate_id,
-                return_attn_weights=True,
-            )
-        else:
-            reprs = self.encoder(
-                masked_reprs,
-                attn_mask,
-                time_id=time_id,
-                var_id=variate_id,
-            )
-        if self.get_reprs:
-            preds = self.out_proj(reprs)
-            result = (reprs, torch.cat((loc, scale), dim=-1))
-        else:
-            preds = self.out_proj(reprs)
-            if training_mode:
-                result = (preds, scaled_target)
-            else:
-                result = preds * scale + loc
-        if return_attn_weights:
-            return result, all_attn_weights
-        return result

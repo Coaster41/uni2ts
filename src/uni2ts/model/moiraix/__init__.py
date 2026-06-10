@@ -13,27 +13,12 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-"""Backward-compatible encoder preset of :class:`MoiraiXForecast`.
+from .forecast import MoiraiXForecast
+from .module import MoiraiXModule
+from .pretrain import MoiraiXPretrain
 
-Defaults match the original ``MoiraieForecast``: no KV cache, single-pass by
-default (AR only when ``ar_method`` is set).
-"""
-
-from typing import Optional
-
-from uni2ts.model.moiraix.forecast import MoiraiXForecast
-
-from .module import MoiraieModule
-
-
-class MoiraieForecast(MoiraiXForecast):
-    module_class = MoiraieModule
-
-    def __init__(
-        self,
-        *args,
-        use_cache: bool = False,
-        ar_method: Optional[str] = None,
-        **kwargs,
-    ):
-        super().__init__(*args, use_cache=use_cache, ar_method=ar_method, **kwargs)
+__all__ = [
+    "MoiraiXForecast",
+    "MoiraiXModule",
+    "MoiraiXPretrain",
+]
