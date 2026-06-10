@@ -35,7 +35,7 @@ from .reshape import (
     SequencifyField,
     Transpose,
 )
-from .task import EvalMaskedPrediction, ExtendMask, MaskedPrediction, ContextPatchMasking, ContiguousPatchMasking
+from .task import EvalMaskedPrediction, ExtendMask, MaskedPrediction, ContextPatchMasking, ContiguousPatchMasking, ContiguousPatchPrediction
 
 __all__ = [
     "AddObservedMask",
@@ -59,6 +59,7 @@ __all__ = [
     "LastValueImputation",
     "MaskedPrediction",
     "ContiguousPatchMasking",
+    "ContiguousPatchPrediction",
     "ContextPatchMasking",
     "PackCollection",
     "PackFields",

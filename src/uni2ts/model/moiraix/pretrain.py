@@ -40,6 +40,7 @@ from uni2ts.transform import (
     AddVariateIndex,
     CausalMeanImputation,
     ContiguousPatchMasking,
+    ContiguousPatchPrediction,
     ContextPatchMasking,
     DefaultPatchSizeConstraints,
     ExtendMask,
@@ -91,6 +92,8 @@ class MoiraiXPretrain(L.LightningModule):
         patch_mask_ratio: float = 0.0,
         cpm_c_mask_max: int = 4,
         cpm_p_mask_max: float = 0.0,
+        cpm_pred_c_mask_max: int = 4,
+        cpm_pred_p_mask_max: float = 0.0,
         num_samples: int = 100,
         beta1: float = 0.9,
         beta2: float = 0.98,
@@ -459,6 +462,10 @@ class MoiraiXPretrain(L.LightningModule):
                 optional_truncate_fields=("past_feat_dynamic_real",),
                 prediction_mask_field="prediction_mask",
                 expected_ndim=3,
+            )
+            + ContiguousPatchPrediction(
+                c_mask_max=self.hparams.cpm_pred_c_mask_max,
+                p_mask_max=self.hparams.cpm_pred_p_mask_max,
             )
             + ContiguousPatchMasking(
                 fields=("target",),

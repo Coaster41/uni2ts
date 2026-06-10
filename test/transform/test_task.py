@@ -18,7 +18,7 @@ from typing import Optional
 import numpy as np
 import pytest
 
-from uni2ts.transform.task import ContiguousPatchMasking, EvalMaskedPrediction, ExtendMask, MaskedPrediction
+from uni2ts.transform.task import ContiguousPatchMasking, ContiguousPatchPrediction, EvalMaskedPrediction, ExtendMask, MaskedPrediction
 
 
 @pytest.mark.parametrize("length, target_dim", [(5, 1), (10, 2)])
@@ -318,6 +318,81 @@ def test_cpm_contiguous_blocks():
         n_slots = context_patches // c_mask
         for i in range(1, n_slots * c_mask):
             if obs[i] != obs[i - 1]:
+                assert i % c_mask == 0, (
+                    f"seed={seed}, c_mask={c_mask}: transition at patch {i} "
+                    f"not on a {c_mask}-patch block boundary"
+                )
+
+
+# ---------------------------------------------------------------------------
+# ContiguousPatchPrediction tests
+# ---------------------------------------------------------------------------
+
+def _cpp_entry(total_patches, context_patches, target_dim, patch_size):
+    """Post-patchification data entry for ContiguousPatchPrediction tests."""
+    arr = np.random.randn(target_dim, total_patches, patch_size)
+    pred_mask = np.zeros((target_dim, total_patches), dtype=bool)
+    pred_mask[:, context_patches:] = True   # original prediction window
+    obs_mask = np.ones((target_dim, total_patches, patch_size), dtype=bool)
+    return {"target": arr, "prediction_mask": pred_mask, "observed_mask": {"target": obs_mask}}
+
+
+def test_cpp_zero_probability_no_change():
+    # p_mask_max=0.0 → no CPM patches added to prediction_mask
+    de = _cpp_entry(total_patches=12, context_patches=8, target_dim=2, patch_size=4)
+    original_pred_mask = de["prediction_mask"].copy()
+    result = ContiguousPatchPrediction(c_mask_max=1, p_mask_max=0.0)(de)
+    assert np.array_equal(result["prediction_mask"], original_pred_mask)
+
+
+def test_cpp_observed_mask_unchanged():
+    # ContiguousPatchPrediction must not touch observed_mask (only prediction_mask)
+    de = _cpp_entry(total_patches=12, context_patches=8, target_dim=1, patch_size=4)
+    original_obs = de["observed_mask"]["target"].copy()
+    result = ContiguousPatchPrediction(c_mask_max=2, p_mask_max=0.8)(de)
+    assert np.array_equal(result["observed_mask"]["target"], original_obs)
+
+
+def test_cpp_only_sets_context_patches():
+    # CPM prediction patches must lie within the context window (not the existing prediction window)
+    total_patches, context_patches = 16, 10
+    de = _cpp_entry(total_patches=total_patches, context_patches=context_patches, target_dim=1, patch_size=4)
+    original_pred_window = de["prediction_mask"][:, context_patches:].copy()
+    result = ContiguousPatchPrediction(c_mask_max=2, p_mask_max=1.0)(de)
+    # Prediction window beyond context must be unchanged (CPM only touches context)
+    assert np.array_equal(result["prediction_mask"][:, context_patches:], original_pred_window)
+    # At least some context patches should now be True (with p_mask_max=1.0)
+    assert result["prediction_mask"][:, :context_patches].any()
+
+
+def test_cpp_contiguous_blocks():
+    # Transitions in the CPM-added prediction_mask only occur at c_mask boundaries.
+    patch_size = 4
+    context_patches = 12
+    c_mask_max = 3
+    total_patches = 16
+
+    arr = np.zeros((1, total_patches, patch_size))
+    pred_mask_orig = np.zeros((1, total_patches), dtype=bool)
+    pred_mask_orig[:, context_patches:] = True
+    obs_mask = np.ones((1, total_patches, patch_size), dtype=bool)
+
+    for seed in range(100):
+        np.random.seed(seed)
+        c_mask = np.random.randint(1, c_mask_max + 1)
+
+        np.random.seed(seed)
+        de = {
+            "target": arr.copy(),
+            "prediction_mask": pred_mask_orig.copy(),
+            "observed_mask": {"target": obs_mask.copy()},
+        }
+        result = ContiguousPatchPrediction(c_mask_max=c_mask_max, p_mask_max=0.9)(de)
+
+        ctx_pred = result["prediction_mask"][0, :context_patches]  # (context_patches,)
+        n_slots = context_patches // c_mask
+        for i in range(1, n_slots * c_mask):
+            if ctx_pred[i] != ctx_pred[i - 1]:
                 assert i % c_mask == 0, (
                     f"seed={seed}, c_mask={c_mask}: transition at patch {i} "
                     f"not on a {c_mask}-patch block boundary"

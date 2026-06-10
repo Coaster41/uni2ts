@@ -108,6 +108,37 @@ class ContiguousPatchMasking(ApplyFuncMixin, Transformation):
 
 
 @dataclass
+class ContiguousPatchPrediction(Transformation):
+    """CPM variant that treats masked context patches as prediction targets.
+
+    Sets prediction_mask=True for CPM-selected context patches so the loss
+    is computed on them directly (same gradient path as MaskedPrediction).
+    Unlike ContiguousPatchMasking, observed_mask is untouched — the values
+    are valid; they are hidden from the model via mask_inputs (encoder mode).
+    Can be used alongside or instead of MaskedPrediction.
+    """
+    prediction_mask_field: str = "prediction_mask"
+    c_mask_max: int = 4
+    p_mask_max: float = 0.5
+
+    def __call__(self, data_entry: dict[str, Any]) -> dict[str, Any]:
+        prediction_mask = data_entry[self.prediction_mask_field]
+        context_patches = int((~prediction_mask[0]).sum())
+
+        c_mask = np.random.randint(1, self.c_mask_max + 1)
+        p_mask = np.random.uniform(0.0, self.p_mask_max)
+        n_slots = context_patches // c_mask
+
+        if n_slots > 0 and p_mask > 0:
+            slot_mask = np.random.binomial(1, p_mask, size=n_slots).astype(bool)
+            patch_mask = np.repeat(slot_mask, c_mask)        # (n_slots * c_mask,)
+            t = patch_mask.shape[0]
+            prediction_mask[:, :t] |= patch_mask[np.newaxis, :]
+
+        return data_entry
+
+
+@dataclass
 class MaskedPrediction(MapFuncMixin, CheckArrNDimMixin, Transformation):
     min_mask_ratio: float
     max_mask_ratio: float
