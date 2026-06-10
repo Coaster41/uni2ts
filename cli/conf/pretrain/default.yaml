@@ -57,7 +57,7 @@ trainer:
     - _target_: lightning.pytorch.callbacks.ModelCheckpoint
       dirpath: ${hydra:runtime.output_dir}/checkpoints
       filename: best_val
-      monitor: val/PackedQuantileDecoderMAELoss_epoch
+      monitor: val/${clsname:${model.loss_func._target_}}_epoch
       mode: min
       save_top_k: 1
       every_n_epochs: 1

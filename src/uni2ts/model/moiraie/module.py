@@ -21,8 +21,11 @@ from huggingface_hub import PyTorchModelHubMixin
 from jaxtyping import Bool, Float, Int
 from torch import nn
 
-# from uni2ts.common.torch_util import packed_causal_attention_mask
-from uni2ts.common.torch_util import mask_fill, packed_attention_mask
+from uni2ts.common.torch_util import (
+    mask_fill,
+    packed_attention_mask,
+    packed_causal_attention_mask,
+)
 from uni2ts.module.norm import RMSNorm
 from uni2ts.module.packed_scaler import PackedNOPScaler, PackedStdScaler
 from uni2ts.module.position import (
@@ -56,6 +59,7 @@ class MoiraieModule(
         num_predict_token: int = 1,
         quantile_levels: tuple[float] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
         min_scale: float = 1e-5,
+        causal: bool = False,
     ):
         """
         :param d_model: model hidden dimensions
@@ -77,6 +81,7 @@ class MoiraieModule(
             print(f"WARNING: num_predict_token should be 1 but is set to {self.num_predict_token}")
         self.max_seq_len = max_seq_len
         self.scaling = scaling
+        self.causal = causal
         self.quantile_levels = quantile_levels
         self.num_quantiles = len(quantile_levels)
 
@@ -162,10 +167,16 @@ class MoiraieModule(
 
         masked_reprs = mask_fill(reprs, prediction_mask, self.mask_encoding.weight)
 
+        attn_mask = (
+            packed_causal_attention_mask(sample_id, time_id)
+            if self.causal
+            else packed_attention_mask(sample_id)
+        )
+
         if return_attn_weights:
             reprs, all_attn_weights = self.encoder(
                 masked_reprs,
-                packed_attention_mask(sample_id),
+                attn_mask,
                 time_id=time_id,
                 var_id=variate_id,
                 return_attn_weights=True,
@@ -173,7 +184,7 @@ class MoiraieModule(
         else:
             reprs = self.encoder(
                 masked_reprs,
-                packed_attention_mask(sample_id),
+                attn_mask,
                 time_id=time_id,
                 var_id=variate_id,
             )

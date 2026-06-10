@@ -44,6 +44,16 @@ def resolve_cls_getattr(cls_name: str, attribute_name: str) -> Any:
     return getattr(cls, attribute_name)
 
 
+@register_resolver("clsname")
+def resolve_clsname(target: str) -> str:
+    """Return the class name (last segment) of a dotted import path.
+
+    e.g. "uni2ts.loss.packed.PackedQuantileEncoderMAELoss" -> "PackedQuantileEncoderMAELoss".
+    Used to derive logged metric names (val/<ClassName>_epoch) from a config _target_.
+    """
+    return target.rsplit(".", 1)[-1]
+
+
 @register_resolver("floordiv")
 def resolve_floordiv(a: int, b: int) -> int:
     return a // b
