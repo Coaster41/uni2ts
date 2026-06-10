@@ -21,6 +21,10 @@ min_patches: 2
 min_mask_ratio: 0.15
 max_mask_ratio: 0.5
 patch_mask_ratio: 0
+cpm_pred_c_mask_max: 4
+cpm_pred_p_mask_max: 0 
+cpm_c_mask_max: 4
+cpm_p_mask_max: 0 
 max_dim: 128
 # moiraie used a fixed 0.3 mask ratio during validation
 val_min_mask_ratio: 0.3

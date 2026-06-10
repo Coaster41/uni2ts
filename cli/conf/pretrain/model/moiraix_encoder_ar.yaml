@@ -22,6 +22,10 @@ min_patches: 2
 min_mask_ratio: 0.6
 max_mask_ratio: 0.75
 patch_mask_ratio: 0
+cpm_pred_c_mask_max: 4
+cpm_pred_p_mask_max: 0 
+cpm_c_mask_max: 4
+cpm_p_mask_max: 0 
 max_dim: 128
 loss_func:
   _target_: uni2ts.loss.packed.PackedQuantileMTPLoss

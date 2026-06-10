@@ -101,6 +101,10 @@ class MoiraiXPretrain(L.LightningModule):
         val_metric: Optional[PackedLoss | list[PackedLoss]] = None,
         val_min_mask_ratio: Optional[float] = None,
         val_max_mask_ratio: Optional[float] = None,
+        val_cpm_c_mask_max: Optional[int] = None,
+        val_cpm_p_mask_max: Optional[float] = None,
+        val_cpm_pred_c_mask_max: Optional[int] = None,
+        val_cpm_pred_p_mask_max: Optional[float] = None,
         lr: float = 1e-3,
         weight_decay: float = 1e-2,
         log_on_step: bool = False,
@@ -387,7 +391,9 @@ class MoiraiXPretrain(L.LightningModule):
         }
 
     def _build_transform(
-        self, min_mask_ratio: float, max_mask_ratio: float
+        self, min_mask_ratio: float, max_mask_ratio: float,
+            c_pred_mask_max: float, p_pred_mask_max: float,
+            c_mask_max: float, p_mask_max: float,
     ) -> Transformation:
         """Build the patch / mask / pack pipeline used for both train and val."""
         return (
@@ -464,14 +470,14 @@ class MoiraiXPretrain(L.LightningModule):
                 expected_ndim=3,
             )
             + ContiguousPatchPrediction(
-                c_mask_max=self.hparams.cpm_pred_c_mask_max,
-                p_mask_max=self.hparams.cpm_pred_p_mask_max,
+                c_mask_max=c_pred_mask_max,
+                p_mask_max=p_pred_mask_max,
             )
             + ContiguousPatchMasking(
                 fields=("target",),
                 optional_fields=("past_feat_dynamic_real",),
-                c_mask_max=self.hparams.cpm_c_mask_max,
-                p_mask_max=self.hparams.cpm_p_mask_max,
+                c_mask_max=c_mask_max,
+                p_mask_max=p_mask_max,
             )
             + ExtendMask(
                 fields=tuple(),
@@ -496,24 +502,23 @@ class MoiraiXPretrain(L.LightningModule):
     def train_transform_map(self) -> dict[str, Callable[..., Transformation]]:
         def default_train_transform():
             return self._build_transform(
-                self.hparams.min_mask_ratio, self.hparams.max_mask_ratio
+                self.hparams.min_mask_ratio, self.hparams.max_mask_ratio,
+                self.hparams.cpm_pred_c_mask_max, self.hparams.cpm_pred_p_mask_max,
+                self.hparams.cpm_c_mask_max, self.hparams.cpm_p_mask_max
             )
 
         return defaultdict(lambda: default_train_transform)
 
     @property
     def val_transform_map(self) -> dict[str, Callable[..., Transformation]]:
-        # If explicit val mask ratios are given, use a val-specific transform
-        # (e.g. a fixed ratio); otherwise reuse the train transform.
-        if (
-            self.hparams.val_min_mask_ratio is None
-            or self.hparams.val_max_mask_ratio is None
-        ):
-            return self.train_transform_map
-
         def default_val_transform():
             return self._build_transform(
-                self.hparams.val_min_mask_ratio, self.hparams.val_max_mask_ratio
+                min_mask_ratio=self.hparams.val_min_mask_ratio if self.hparams.val_min_mask_ratio is not None else self.hparams.min_mask_ratio,
+                max_mask_ratio=self.hparams.val_max_mask_ratio if self.hparams.val_max_mask_ratio is not None else self.hparams.max_mask_ratio,
+                c_pred_mask_max=self.hparams.val_cpm_pred_c_mask_max if self.hparams.val_cpm_pred_c_mask_max is not None else self.hparams.cpm_pred_c_mask_max,
+                p_pred_mask_max=self.hparams.val_cpm_pred_p_mask_max if self.hparams.val_cpm_pred_p_mask_max is not None else self.hparams.cpm_pred_p_mask_max,
+                c_mask_max=self.hparams.val_cpm_c_mask_max if self.hparams.val_cpm_c_mask_max is not None else self.hparams.cpm_c_mask_max,
+                p_mask_max=self.hparams.val_cpm_p_mask_max if self.hparams.val_cpm_p_mask_max is not None else self.hparams.cpm_p_mask_max,
             )
 
         return defaultdict(lambda: default_val_transform)
