@@ -18,7 +18,7 @@ from typing import Optional
 import numpy as np
 import pytest
 
-from uni2ts.transform.task import EvalMaskedPrediction, ExtendMask, MaskedPrediction
+from uni2ts.transform.task import ContiguousPatchMasking, EvalMaskedPrediction, ExtendMask, MaskedPrediction
 
 
 @pytest.mark.parametrize("length, target_dim", [(5, 1), (10, 2)])
@@ -257,3 +257,68 @@ def test_eval_masked_prediction(
                 transformed_data_entry[field],
                 data_entry[field][:, :-mask_length],
             )
+
+
+# ---------------------------------------------------------------------------
+# ContiguousPatchMasking tests
+# ---------------------------------------------------------------------------
+
+def _cpm_entry(total_patches, context_patches, target_dim, patch_size):
+    """Post-patchification data entry for ContiguousPatchMasking tests."""
+    arr = np.random.randn(target_dim, total_patches, patch_size)
+    pred_mask = np.zeros((target_dim, total_patches), dtype=bool)
+    pred_mask[:, context_patches:] = True
+    obs_mask = np.ones((target_dim, context_patches, patch_size), dtype=bool)
+    return {"target": arr, "prediction_mask": pred_mask, "observed_mask": {"target": obs_mask}}
+
+
+def test_cpm_zero_probability_all_visible():
+    # (c) c_mask_max=1, p_mask_max=0.0 → p_mask=0 always → Bernoulli(0) → no masking
+    de = _cpm_entry(total_patches=10, context_patches=8, target_dim=2, patch_size=4)
+    result = ContiguousPatchMasking(fields=("target",), c_mask_max=1, p_mask_max=0.0)(de)
+    assert np.all(result["observed_mask"]["target"])
+
+
+def test_cpm_mask_shape_unchanged():
+    # (b) observed_mask retains shape (var, context_patches, patch_size) — no truncation
+    de = _cpm_entry(total_patches=12, context_patches=8, target_dim=1, patch_size=4)
+    result = ContiguousPatchMasking(fields=("target",), c_mask_max=2, p_mask_max=0.8)(de)
+    assert result["observed_mask"]["target"].shape == (1, 8, 4)
+
+
+def test_cpm_contiguous_blocks():
+    # (a) Transitions in the context observed_mask only occur at c_mask-patch boundaries.
+    # Re-simulate the same random draws to know c_mask, then verify the output mask.
+    patch_size = 4
+    context_patches = 12
+    c_mask_max = 3
+
+    # Deterministic data so seed controls only the transform's RNG draws
+    arr = np.zeros((1, 16, patch_size))
+    pred_mask = np.zeros((1, 16), dtype=bool)
+    pred_mask[:, context_patches:] = True
+    obs_mask_orig = np.ones((1, context_patches, patch_size), dtype=bool)
+
+    for seed in range(100):
+        # Peek at the same random draws the transform will make (randint then uniform)
+        np.random.seed(seed)
+        c_mask = np.random.randint(1, c_mask_max + 1)
+
+        np.random.seed(seed)
+        de = {
+            "target": arr.copy(),
+            "prediction_mask": pred_mask.copy(),
+            "observed_mask": {"target": obs_mask_orig.copy()},
+        }
+        result = ContiguousPatchMasking(
+            fields=("target",), c_mask_max=c_mask_max, p_mask_max=0.9
+        )(de)
+
+        obs = result["observed_mask"]["target"][0, :, 0]  # (context_patches,) one bool per patch
+        n_slots = context_patches // c_mask
+        for i in range(1, n_slots * c_mask):
+            if obs[i] != obs[i - 1]:
+                assert i % c_mask == 0, (
+                    f"seed={seed}, c_mask={c_mask}: transition at patch {i} "
+                    f"not on a {c_mask}-patch block boundary"
+                )

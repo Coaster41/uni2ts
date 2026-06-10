@@ -71,6 +71,43 @@ class ContextPatchMasking(ApplyFuncMixin, Transformation):
 
 
 @dataclass
+class ContiguousPatchMasking(ApplyFuncMixin, Transformation):
+    fields: tuple[str, ...]
+    optional_fields: tuple[str, ...] = tuple()
+    prediction_mask_field: str = "prediction_mask"
+    observed_mask_field: str = "observed_mask"
+    c_mask_max: int = 4      # TiRex Appendix D.3 default
+    p_mask_max: float = 0.5  # TiRex Appendix D.3 default
+
+    def __call__(self, data_entry: dict[str, Any]) -> dict[str, Any]:
+        self.apply_func(
+            self._add_cpm_mask,
+            data_entry,
+            self.fields,
+            optional_fields=self.optional_fields,
+        )
+        return data_entry
+
+    def _add_cpm_mask(self, data_entry: dict[str, Any], field: str) -> None:
+        arr = data_entry[field]                                       # (var, total_patches, patch_size)
+        prediction_mask = data_entry[self.prediction_mask_field]
+        observed_mask = data_entry[self.observed_mask_field][field]   # (var, context_patches, patch_size)
+
+        context_patches = int((~prediction_mask[0]).sum())            # already in patch units post-Patchify
+        c_mask = np.random.randint(1, self.c_mask_max + 1)           # U(1, c_mask_max)
+        p_mask = np.random.uniform(0.0, self.p_mask_max)             # U(0, p_mask_max)
+        n_slots = context_patches // c_mask
+
+        if n_slots > 0 and p_mask > 0:
+            slot_mask = np.random.binomial(1, p_mask, size=n_slots).astype(bool)
+            patch_mask = np.repeat(slot_mask, c_mask)                # (n_slots * c_mask,) patch units
+            t = patch_mask.shape[0]
+            expanded = patch_mask[np.newaxis, :, np.newaxis]         # (1, t, 1) broadcasts over var, patch_size
+            arr[:, :t] = np.where(expanded, np.nan, arr[:, :t])
+            observed_mask[:, :t] = np.where(expanded, False, observed_mask[:, :t])
+
+
+@dataclass
 class MaskedPrediction(MapFuncMixin, CheckArrNDimMixin, Transformation):
     min_mask_ratio: float
     max_mask_ratio: float
