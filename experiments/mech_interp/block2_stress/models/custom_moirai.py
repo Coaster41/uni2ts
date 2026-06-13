@@ -134,3 +134,76 @@ class MoiraieAdapter(_CustomMoiraiAdapter):
     """Custom bidirectional/encoder model (``moiraie``)."""
 
     model_name = "moiraie"
+
+
+class MoiraiXAdapter(ForecastAdapter):
+    """Adapter for ``MoiraiXModule`` checkpoints.
+
+    Loads via ``MoiraiXModule.from_pretrained`` so it works with any checkpoint
+    trained through the unified moiraix path (decoder, encoder, encoder_ar, etc.).
+    The ``predict_next`` flag on the loaded module selects the extraction path:
+    True → causal/next-token (read from last context patch), False → encoder
+    (read from prediction patches), matching ``_extract_fq``'s ``is_moiraic`` arg.
+    """
+
+    def __init__(self, ckpt: str, device: str = "cpu", **_ignored):
+        from uni2ts.model.moiraix.module import MoiraiXModule
+
+        self.device = device
+        self.module = MoiraiXModule.from_pretrained(ckpt).eval().to(device)
+        self.patch_size = int(self.module.patch_size)
+        self.num_predict_token = int(self.module.num_predict_token)
+        self.quantile_levels = tuple(
+            getattr(self.module, "quantile_levels", DEFAULT_QUANTILE_LEVELS)
+        )
+        if len(self.quantile_levels) != int(self.module.num_quantiles):
+            self.quantile_levels = DEFAULT_QUANTILE_LEVELS
+
+    def predict_quantiles(
+        self,
+        context: np.ndarray,
+        horizon: int,
+        batch_size: int = 32,
+    ) -> np.ndarray:
+        import torch
+
+        from experiments.mech_interp.lib import make_batch
+
+        context = np.asarray(context, dtype=np.float32)
+        n, ctx_len = context.shape
+        P = self.patch_size
+        if ctx_len % P != 0:
+            raise ValueError(
+                f"context length {ctx_len} not divisible by patch_size {P}"
+            )
+        if horizon % P != 0:
+            raise ValueError(f"horizon {horizon} not divisible by patch_size {P}")
+        context_patches = ctx_len // P
+        pred_patches = horizon // P
+
+        Q = int(self.module.num_quantiles)
+        is_predict_next = bool(self.module.predict_next)
+
+        full = np.concatenate(
+            [context, np.zeros((n, horizon), dtype=np.float32)], axis=1
+        )
+
+        fq_buffer: list[np.ndarray] = []
+        for i in range(0, n, batch_size):
+            chunk = full[i : i + batch_size]
+            batch = make_batch(chunk, P, context_patches, pred_patches, self.device)
+            with torch.no_grad():
+                result = self.module(**batch, training_mode=False)
+            result_np = result.detach().cpu().float().numpy()
+            fq_buffer.append(
+                _extract_fq(
+                    result_np,
+                    is_predict_next,
+                    self.num_predict_token,
+                    Q,
+                    P,
+                    context_patches,
+                    pred_patches,
+                )
+            )
+        return np.concatenate(fq_buffer, axis=0).astype(np.float32)

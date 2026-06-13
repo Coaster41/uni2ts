@@ -23,6 +23,7 @@ _PKG = __name__  # "experiments.mech_interp.block2_stress.models"
 _REGISTRY: dict[str, tuple[str, str]] = {
     "moiraic": ("custom_moirai", "MoiraicAdapter"),
     "moiraie": ("custom_moirai", "MoiraieAdapter"),
+    "moiraix": ("custom_moirai", "MoiraiXAdapter"),
     "moirai2": ("moirai2", "Moirai2Adapter"),
     "chronos2": ("chronos2", "Chronos2Adapter"),
     "timesfm25": ("timesfm25", "TimesFM25Adapter"),

@@ -796,6 +796,12 @@ class MoiraiXForecast(L.LightningModule):
                 variate_id,
                 prediction_mask,
             )
+            # run_and_extract interleaves (seq * predict_token); for the
+            # current-token encoder each position's pt_idx=0 is the direct
+            # prediction for that position, so stride-slice away the extras.
+            npt = self.module.num_predict_token
+            if npt > 1:
+                preds_at_pred = preds_at_pred[..., ::npt, :, :]
             quantile_prediction[..., pred_index, :, :] = preds_at_pred
             return self._format_preds(
                 self.module.num_quantiles,

@@ -1,14 +1,14 @@
 seed: 0
 patch_len: 16
-context_patches: 16       # context = 256 time steps
-horizon_patches: 4        # horizon = 64 time steps
+context_patches: 20       # context = 256 time steps
+horizon_patches: 5        # horizon = 64 time steps
 n_per_level_per_period: 256
 
 output_dir: data/stress   # relative to block2_stress/
 
 family_a:
   snr_levels: [20.0]
-  period_bins: [7, 8, 16, 24, 32, 48]    # period choices (time steps)
+  period_bins: [7, 8, 10, 16, 20, 24, 32, 40, 48]    # period choices (time steps)
   ar1_carrier: false                   # enable optional AR(1) aperiodic carrier
 
 family_b:
@@ -19,7 +19,7 @@ family_b:
   phi_restart_prob: 0.0        # per-step prob of resetting to start_value + noise
   phi_restart_noise_sigma: 0.5 # std of noise added to phi_start_value on restart
   outlier_deltas: [0.5, 1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0]  # units of context std
-  triangle_period_bins: [7, 8, 16, 24, 32, 48]
+  triangle_period_bins: [7, 8, 10, 16, 20, 24, 32, 40, 48]
 
 family_c:
   intermittent_p: [0.5]
@@ -28,7 +28,7 @@ family_c:
   base_noise_sigma: 0.05                 # low background noise for style families
 
 family_d:
-  period_bins: [7, 8, 16, 24, 32, 48]
+  period_bins: [7, 8, 10, 16, 20, 24, 32, 40, 48]
   base_noise_sigma: 0.02          # small background noise for "clean" base
 
   noise_snr_levels: [1.0, 5.0, 20.0]          # ratio signal-power / noise-power

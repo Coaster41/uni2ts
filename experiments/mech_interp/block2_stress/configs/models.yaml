@@ -10,29 +10,44 @@
 # subset. Adapters import their backend lazily, so an env missing one package
 # can still run the others.
 models:
-  moiraie:
+  moiraie_16:
     adapter: moiraie
     ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraie/gift_eval_pretrain_weighted/moiraie_training_7/HF_checkpoints/last
-  moiraic:
+  moiraic_16:
     adapter: moiraic
     ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraic/gift_eval_pretrain_weighted/moiraic_training_11/HF_checkpoints/last
-  moirai2:
-    adapter: moirai2
-    model_path: Salesforce/moirai-2.0-R-small
-  chronos2:
-    adapter: chronos2
-    model_name: amazon/chronos-2
-  timesfm25:
-    adapter: timesfm25
-    # `checkpoint` is the HF repo id (or local dir) passed to from_pretrained;
-    # defaults to the 200M torch weights, which also moves the model to cuda:0.
-    # checkpoint: google/timesfm-2.5-200m-pytorch
-  patchtst_fm:
-    adapter: patchtst_fm
-    ckpt_path: ibm-granite/granite-timeseries-patchtst-fm-r1
-    # predictor_path: /path/to/granite-tsfm/notebooks/hfdemo/patchtst_fm
-    predictor_path: /srv/disk00/ctadler/granite-tsfm/notebooks/hfdemo/patchtst_fm
-  toto:
-    adapter: toto
-    model_id: Datadog/Toto-2.0-22m   # quantile-head Toto 2.0 (not sampling-based)
-    # decode_block_size: 768
+  moiraie_patch_20:
+    adapter: moiraie
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraie/gift_eval_pretrain_weighted/moiraie_training_10/HF_checkpoints/last
+  moiraic_patch_20:
+    adapter: moiraic
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraic/gift_eval_pretrain_weighted/moiraic_training_12/HF_checkpoints/last
+  moiraie_causal_16:
+    adapter: moiraie
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraie_causal/gift_eval_pretrain_weighted/moiraie_training_0/HF_checkpoints/last
+  moiraix_dec_cpm_16:
+    adapter: moiraix
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraix/gift_eval_pretrain_weighted/moiraix_dec_cpm_0/HF_checkpoints/last
+  moiraie_enc_cpm_16:
+    adapter: moiraix
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraix/gift_eval_pretrain_weighted/moiraix_enc_cpm_0/HF_checkpoints/last
+  # moirai2:
+  #   adapter: moirai2
+  #   model_path: Salesforce/moirai-2.0-R-small
+  # chronos2:
+  #   adapter: chronos2
+  #   model_name: amazon/chronos-2
+  # timesfm25:
+  #   adapter: timesfm25
+  #   # `checkpoint` is the HF repo id (or local dir) passed to from_pretrained;
+  #   # defaults to the 200M torch weights, which also moves the model to cuda:0.
+  #   # checkpoint: google/timesfm-2.5-200m-pytorch
+  # patchtst_fm:
+  #   adapter: patchtst_fm
+  #   ckpt_path: ibm-granite/granite-timeseries-patchtst-fm-r1
+  #   # predictor_path: /path/to/granite-tsfm/notebooks/hfdemo/patchtst_fm
+  #   predictor_path: /srv/disk00/ctadler/granite-tsfm/notebooks/hfdemo/patchtst_fm
+  # toto:
+  #   adapter: toto
+  #   model_id: Datadog/Toto-2.0-22m   # quantile-head Toto 2.0 (not sampling-based)
+  #   # decode_block_size: 768
