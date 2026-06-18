@@ -1,0 +1,45 @@
+_target_: uni2ts.model.moiraix.MoiraiXPretrain
+module_kwargs:
+  _target_: builtins.dict
+  d_model: 512
+  d_ff: 2048
+  num_layers: 8
+  patch_size: 16
+  quantile_levels: ${as_tuple:[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]}
+  max_seq_len: 512
+  attn_dropout_p: 0.0
+  num_predict_token: 4
+  dropout_p: 0.0
+  scaling: true
+  min_scale: 1.0e-5
+  causal: true
+  mask_inputs: false
+  predict_next: true
+  train_scale_full_observed: true
+min_patches: 2
+min_mask_ratio: 0.7
+max_mask_ratio: 0.95
+patch_mask_ratio: 0
+cpm_pred_c_mask_max: 4
+cpm_pred_p_mask_max: 0
+cpm_c_mask_max: 0
+cpm_p_mask_max: 0
+val_min_mask_ratio: 0.3
+val_max_mask_ratio: 0.3
+val_cpm_pred_c_mask_max: 4
+val_cpm_pred_p_mask_max: 0
+val_cpm_c_mask_max: 4
+val_cpm_p_mask_max: 0
+max_dim: 128
+loss_func:
+  _target_: uni2ts.loss.packed.PackedQuantileMTPLoss
+  shift: true
+val_metric:
+  _target_: uni2ts.loss.packed.PackedNMAELoss
+lr: 1.0e-3
+weight_decay: 1.0e-1
+beta1: 0.9
+beta2: 0.98
+num_training_steps: ${mul:${trainer.max_epochs},${train_dataloader.num_batches_per_epoch}}
+num_warmup_steps: 10_000
+log_on_step: true

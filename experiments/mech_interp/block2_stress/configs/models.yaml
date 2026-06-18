@@ -28,9 +28,15 @@ models:
   moiraix_dec_cpm_16:
     adapter: moiraix
     ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraix/gift_eval_pretrain_weighted/moiraix_dec_cpm_0/HF_checkpoints/last
-  moiraie_enc_cpm_16:
+  moiraix_enc_cpm_16:
     adapter: moiraix
     ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraix/gift_eval_pretrain_weighted/moiraix_enc_cpm_0/HF_checkpoints/last
+  moiraix_dec_cpm_16_1:
+    adapter: moiraix
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraix/gift_eval_pretrain_weighted/moiraix_dec_cpm_1/HF_checkpoints/last
+  moiraix_enc_cpm_16_1:
+    adapter: moiraix
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraix/gift_eval_pretrain_weighted/moiraix_enc_cpm_1/HF_checkpoints/last
   # moirai2:
   #   adapter: moirai2
   #   model_path: Salesforce/moirai-2.0-R-small

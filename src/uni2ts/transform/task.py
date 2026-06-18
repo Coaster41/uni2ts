@@ -25,6 +25,26 @@ from ._mixin import CheckArrNDimMixin, CollectFuncMixin, MapFuncMixin, ApplyFunc
 from uni2ts.common.typing import UnivarTimeSeries
 from einops import rearrange
 
+
+def _observed_patch_mean(
+    arr: Float[np.ndarray, "var *time"],
+    observed_mask: Bool[np.ndarray, "var *time"],
+) -> Float[np.ndarray, "var ..."]:
+    """Per-variate mean over observed positions, broadcastable back onto ``arr``.
+
+    Returns a finite ``(var, 1, ...)`` array (0.0 where a variate has no observed
+    position) so masked entries can be filled with a value consistent with the
+    model's missing-data contract instead of NaN. The extra trailing 1-dims match
+    ``arr.ndim`` so the result broadcasts directly against ``arr``.
+    """
+    var = arr.shape[0]
+    obs = observed_mask.astype(arr.dtype)
+    flat_sum = (arr * obs).reshape(var, -1).sum(axis=1)
+    flat_cnt = obs.reshape(var, -1).sum(axis=1)
+    fill = np.where(flat_cnt > 0, flat_sum / np.maximum(flat_cnt, 1.0), 0.0)
+    return fill.reshape((var,) + (1,) * (arr.ndim - 1))
+
+
 @dataclass
 class ContextPatchMasking(ApplyFuncMixin, Transformation):
     fields: tuple[str, ...]
@@ -61,12 +81,16 @@ class ContextPatchMasking(ApplyFuncMixin, Transformation):
                 num_context_patches, size=num_mask, replace=False
             )
 
+            # Fill masked positions with a finite per-variate observed mean (not
+            # NaN) so the (value, observed_mask=False) missing-data contract holds
+            # and the scaler/network stay finite. See _observed_patch_mean.
+            fill = _observed_patch_mean(arr[:, :context_length], observed_mask[:, :context_length])
             # Assume context is left aligned (skip next line)
             # context_start = context_length % patch_size
             for idx in mask_indices:
                 patch_start = idx * patch_size
                 patch_end = patch_start + patch_size
-                arr[:, patch_start:patch_end] = np.nan
+                arr[:, patch_start:patch_end] = fill
                 observed_mask[:, patch_start:patch_end] = False
 
 
@@ -103,7 +127,16 @@ class ContiguousPatchMasking(ApplyFuncMixin, Transformation):
             patch_mask = np.repeat(slot_mask, c_mask)                # (n_slots * c_mask,) patch units
             t = patch_mask.shape[0]
             expanded = patch_mask[np.newaxis, :, np.newaxis]         # (1, t, 1) broadcasts over var, patch_size
-            arr[:, :t] = np.where(expanded, np.nan, arr[:, :t])
+            # Masked patches follow the model's missing-data contract: a *finite*
+            # value plus observed_mask=False. Writing np.nan here would poison the
+            # scaler (nan * 0 = nan) and the network for the mask_inputs=false
+            # decoder, where no mask_fill rescues these tokens. Fill with the
+            # per-variate mean of observed context values (-> ~neutral scaled
+            # input), falling back to 0.0 when a variate has no observed context.
+            fill = _observed_patch_mean(
+                arr[:, :context_patches], observed_mask[:, :context_patches]
+            )
+            arr[:, :t] = np.where(expanded, fill, arr[:, :t])
             observed_mask[:, :t] = np.where(expanded, False, observed_mask[:, :t])
 
 

@@ -40,6 +40,7 @@ class MoiraieModule(MoiraiXModule):
         quantile_levels: tuple[float] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9),
         min_scale: float = 1e-5,
         causal: bool = False,
+        train_scale_full_observed: bool = False,
         **kwargs,  # absorb/override any stale objective flags from old configs
     ):
         super().__init__(
@@ -57,4 +58,5 @@ class MoiraieModule(MoiraiXModule):
             causal=causal,
             mask_inputs=True,
             predict_next=False,
+            train_scale_full_observed=train_scale_full_observed,
         )

@@ -84,6 +84,7 @@ class MoiraiXModule(
         causal: bool = False,
         mask_inputs: bool = True,
         predict_next: bool = False,
+        train_scale_full_observed: bool = False,
     ):
         """
         :param d_model: model hidden dimensions
@@ -99,6 +100,13 @@ class MoiraiXModule(
         :param causal: causal vs bidirectional attention
         :param mask_inputs: replace prediction-window tokens with a learned mask embedding
         :param predict_next: next-token (AR) objective vs current-token reconstruction
+        :param train_scale_full_observed: if True, compute the scaler loc/scale from
+            the *entire* observation mask (context **and** prediction tokens) during
+            training only. This intentionally lets the normalization "peek" at the
+            prediction window — a hyperparameter for studying its effect. It applies
+            only while the module is in training mode (``self.training``); validation,
+            inference and forecasting always use the honest context-only statistics.
+            Default (False) preserves the original context-only behavior.
         """
         super().__init__()
         self.d_model = d_model
@@ -110,6 +118,7 @@ class MoiraiXModule(
         self.causal = causal
         self.mask_inputs = mask_inputs
         self.predict_next = predict_next
+        self.train_scale_full_observed = train_scale_full_observed
         self.quantile_levels = quantile_levels
         self.num_quantiles = len(quantile_levels)
 
@@ -199,9 +208,19 @@ class MoiraiXModule(
             # ------------------------------------------------------------------
             # Prefill path
             # ------------------------------------------------------------------
+            # By default the scaler only sees context (non-prediction) tokens so the
+            # normalization cannot leak information about the prediction window. When
+            # ``train_scale_full_observed`` is set we instead feed the full observation
+            # mask *during training only* (``self.training``), letting loc/scale be
+            # computed from prediction tokens too. Validation/inference keep the honest
+            # context-only statistics so metrics stay comparable.
+            if self.train_scale_full_observed and self.training:
+                scaler_observed_mask = observed_mask
+            else:
+                scaler_observed_mask = observed_mask * ~prediction_mask.unsqueeze(-1)
             loc, scale = self.scaler(
                 target,
-                observed_mask * ~prediction_mask.unsqueeze(-1),
+                scaler_observed_mask,
                 sample_id,
                 variate_id,
             )
