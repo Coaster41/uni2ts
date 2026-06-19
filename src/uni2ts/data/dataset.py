@@ -202,8 +202,25 @@ class MultiSampleTimeSeriesDataset(TimeSeriesDataset):
 
     def _get_data(self, idx: int) -> dict[str, BatchedData]:
         n_series = self.sampler(min(self.num_ts, self.max_ts))
-        choices = np.concatenate([np.arange(idx), np.arange(idx + 1, self.num_ts)])
-        others = np.random.choice(choices, n_series - 1, replace=False)
+        k = n_series - 1
+        # Sample k distinct indices in [0, num_ts) excluding idx WITHOUT building
+        # an O(num_ts) candidate array. The previous
+        #   np.random.choice(concat([arange(idx), arange(idx+1, num_ts)]), k,
+        #                    replace=False)
+        # allocated and scanned an O(num_ts) array on every sample -- the same
+        # class of slowdown as the CDF fix in TimeSeriesDataset above. Rejection
+        # sampling is O(k) expected when k << num_ts (the common case).
+        if k <= 0:
+            others = np.empty(0, dtype=np.int64)
+        elif k >= self.num_ts - 1:
+            others = np.concatenate([np.arange(idx), np.arange(idx + 1, self.num_ts)])
+        else:
+            chosen: set[int] = set()
+            while len(chosen) < k:
+                j = int(np.random.randint(self.num_ts))
+                if j != idx:
+                    chosen.add(j)
+            others = np.fromiter(chosen, dtype=np.int64, count=k)
         samples = self.indexer[np.concatenate([[idx], others])]
         return samples
 
