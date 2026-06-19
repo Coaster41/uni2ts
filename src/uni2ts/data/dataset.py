@@ -76,6 +76,14 @@ class TimeSeriesDataset(Dataset):
         else:
             raise ValueError(f"Unknown sample type {sample_time_series}")
 
+        # Precompute the cumulative distribution ONCE. np.random.choice(N, p=...)
+        # recomputes an O(N) cumsum (and allocates an N*8-byte array) on every
+        # call (~120 ms/sample at N=1e7); searchsorted on a cached CDF is
+        # O(log N) (~10 us/sample). This is the 50-1000x dataloader slowdown fix.
+        self._prob_cdf = (
+            np.cumsum(self.probabilities) if self.probabilities is not None else None
+        )
+
     def __getitem__(self, idx: int) -> dict[str, FlattenedData]:
         """
         Obtain a time series from the dataset, flatten
@@ -95,7 +103,16 @@ class TimeSeriesDataset(Dataset):
                     )
                 
                 if self.sample_time_series != SampleTimeSeriesType.NONE:
-                    actual_idx = np.random.choice(len(self.probabilities), p=self.probabilities)
+                    # O(log N) inverse-CDF sample (see self._prob_cdf in __init__)
+                    actual_idx = int(
+                        np.searchsorted(
+                            self._prob_cdf,
+                            np.random.random() * self._prob_cdf[-1],
+                            side="right",
+                        )
+                    )
+                    if actual_idx >= len(self.probabilities):
+                        actual_idx = len(self.probabilities) - 1
 
                 return self.transform(
                     self._flatten_data(self._get_data(actual_idx))
