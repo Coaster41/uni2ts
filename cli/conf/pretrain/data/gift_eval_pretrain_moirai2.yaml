@@ -1,13 +1,45 @@
 # Moirai 2.0-style mixture: identical to gift_eval_pretrain_weighted.yaml except
-# the Chronos synthetic builders are weighted UP by ~85x so synthetic data is a
-# major fraction of the corpus, as in the report (Chronos-Mixup is the single
-# largest component, ~30M of 36M series). dataset_weight multiplies dataset SIZE
-# and sampling is proportional to size, so effective windows ~= num_series*weight:
-#   chronos_tsmixup_10m  : 10M * 2.0 = ~20M  (was 0.023 -> ~230k, i.e. ~0%)
-#   chronos_kernel_synth_1m: 1M * 0.6 = ~0.6M (keeps the paper's ~30:1 mixup:ksynth)
-# These are best-guess starting points (the exact realized share depends on the
-# effective sizes of every other dataset, which aren't computed here) -- verify by
-# inspecting per-builder dataset __len__ ratios and tune to taste.
+# the Chronos synthetic builders are reweighted to a deliberate synthetic share.
+#
+# How weights become a sampling fraction: dataset_weight multiplies dataset SIZE
+# (TimeSeriesDataset.__len__ = ceil(num_ts * weight)) and the pretrain loader draws
+# uniformly over the concatenated dataset, so a dataset's sampling share is
+#   share_d = num_ts_d * weight_d / sum_i (num_ts_i * weight_i).
+# The non-Chronos datasets are each pre-weighted to contribute an equal ~126.6k
+# windows -> a fixed real pool of ~2.77M effective windows.
+#
+# Target: ~20% synthetic / ~80% real, at Chronos's 9:1 TSMixup:KernelSynth ratio.
+# Rationale (see test/data/test_synthetic_weights.py for the full derivation):
+#   - Moirai 2.0's reported ~86% "synthetic" corpus is ~83% TSMixup (convex mixes
+#     of REAL series, i.e. augmented-real) + ~3% KernelSynth (pure GP synthetic);
+#     the paper does NOT disclose its training SAMPLING weights, only corpus counts.
+#   - Chronos's ablation: pure synthetic (KernelSynth) is best at ~10% and degrades
+#     beyond; it trained TSMix:KernelSynth at 9:1.
+#   - Treating BOTH Chronos streams as synthetic, ~20% total keeps real data clearly
+#     dominant while giving synthetic meaningful presence. KernelSynth lands at ~2%
+#     (well under the 10% ceiling).
+# Effective windows ~= num_series * weight:
+#   chronos_tsmixup_10m    : 10M * 0.06233 = ~0.623M  -> ~18% of corpus
+#   chronos_kernel_synth_1m: 1M  * 0.06926 = ~0.069M  -> ~2%  of corpus
+# Prior settings for reference: old gift_eval_pretrain_weighted used 0.023 / 0.0069
+# (~8% synthetic); earlier revs of this file used 2.0 / 0.6 (~88%) and 0.107 / 0.119
+# (~30%).
+#
+# ---- How to rescale the synthetic share manually ----------------------------
+# The fixed real pool is R = 2,770,242 effective windows (sum of num_ts*weight over
+# all NON-Chronos builders; recompute if you add/drop real datasets). To hit a
+# target total synthetic fraction p at the 9:1 ratio:
+#   synth_eff = R * p / (1 - p)
+#   w_mix     = synth_eff * (9/10) / 10_000_000   # tsmixup has 10M series
+#   w_ks      = synth_eff * (1/10) /  1_000_000   # kernel_synth has 1M series
+# Worked example for p = 0.20:
+#   synth_eff = 2,770,242 * 0.20/0.80 = 692,560
+#   w_mix = 692,560 * 0.9 / 1e7 = 0.06233
+#   w_ks  = 692,560 * 0.1 / 1e6 = 0.06926
+# Shortcut: the share is monotonic in a common scale factor, so to nudge the total
+# while keeping 9:1, just multiply BOTH weights by the same constant (e.g. x1.5 of
+# the 0.06233/0.06926 pair -> ~27% synthetic). For a different mix:ks ratio r,
+# substitute (r/(r+1)) and (1/(r+1)) for the 9/10 and 1/10 factors above.
 _target_: uni2ts.data.builder.ConcatDatasetBuilder
 _args_:
   - _target_: uni2ts.data.builder.lotsa_v1.Buildings900KDatasetBuilder
@@ -291,8 +323,8 @@ _args_:
   - _target_: uni2ts.data.builder.lotsa_v1.ChronosSyntheticDatasetBuilder
     datasets: ${cls_getattr:${._target_},dataset_list}
     weight_map:
-      chronos_tsmixup_10m: 2.0
-      chronos_kernel_synth_1m: 0.6
+      chronos_tsmixup_10m: 0.06233
+      chronos_kernel_synth_1m: 0.06926
     sample_time_series:
       _target_: uni2ts.data.dataset.SampleTimeSeriesType
       _args_: ["proportional"]
