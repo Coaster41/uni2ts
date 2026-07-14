@@ -1,0 +1,116 @@
+# Block-3 adversarial / boundary-vulnerability config.
+#
+# Model names refer to entries in block2_stress/configs/models.yaml — the
+# checkpoint paths live there and are not duplicated here.
+
+geometry:
+  ctx: 256
+  horizon: 64
+  n_per_source: 64        # windows per GIFT dataset / per stress family
+
+# L_inf budget as a multiple of the per-series context std (sigma_ctx).
+eps_grid: [0.01, 0.02, 0.05, 0.10, 0.20]
+
+# Fraction of the context the attacker may touch. 1.00 == dense.
+ratios: [0.05, 0.10, 0.25, 1.00]
+
+supports: [last, first, random, mid, all]
+
+attacks: [fgsm, pgd10, random]   # random = same-budget no-gradient control
+
+# Differentiable models: gradient saliency + FGSM/PGD.
+#
+# The two axes we separate (the handoff conflated them: moiraix_dec_cpm_4 is
+# causal but is NOT a next-token decoder -- it still reads mask slots):
+#   attention: bidirectional | causal
+#   readout:   mask-slot (predict_next=false) | next-token from last ctx patch
+#
+# Factorial on the SAME data mix (gift_eval_pretrain_moirai2), one flag at a time:
+#   moiraix_enc_cpm_2  bidir  + mask-slot   --.
+#   moiraix_dec_cpm_4  causal + mask-slot   <-'  attention axis
+#   moirai2_repro_0    causal + next-token  <--  readout axis
+# Independent confirmation pair on the older gift_eval_pretrain_weighted mix:
+#   moiraie_16 (bidir + mask-slot) vs moiraic_16 (causal + next-token, stronger).
+whitebox:
+  - moiraix_enc_cpm_2
+  - moiraix_dec_cpm_4
+  - moirai2_repro_0
+  - moiraie_16
+  - moiraic_16
+  - moiraix_enc_cpm_gift
+  - timesfmx_trackb_p30_nosde_gift
+  - moirai2
+  # Official TimesFM-2.5 200M loads into TimesFMXModule with strict=True
+  # (checkpoint parity), so the frontier model is differentiable -- 200M scale,
+  # and TimesFM is one of the models the paper itself evaluates.
+  - timesfm25
+
+# No-gradient models: finite-difference bump probe + transfer only.
+blackbox:
+  - chronos2
+
+# Which grad_models class backs each white-box name (kind arg of the registry).
+grad_kind:
+  moiraix_enc_cpm_2: moiraix
+  moiraix_dec_cpm_4: moiraix
+  moirai2_repro_0: moiraix
+  # moiraic/moiraie config.json predates the flags -- must load via the preset
+  # module class or predict_next silently defaults to False (wrong readout slot).
+  moiraie_16: moiraie
+  moiraic_16: moiraic
+  moiraix_enc_cpm_gift: moiraix
+  moirai2: moirai2
+  timesfmx_trackb_p30_nosde_gift: timesfmx
+  timesfm25: timesfm25
+
+# Architecture facts, for grouping in analyze.py / the writeup.
+arch:
+  moiraix_enc_cpm_2:  {attention: bidirectional, readout: mask_slot,  patch: 16, mix: moirai2}
+  moiraix_dec_cpm_4:  {attention: causal,        readout: mask_slot,  patch: 16, mix: moirai2}
+  moirai2_repro_0:    {attention: causal,        readout: next_token, patch: 16, mix: moirai2}
+  moiraie_16:         {attention: bidirectional, readout: mask_slot,  patch: 16, mix: weighted}
+  moiraic_16:         {attention: causal,        readout: next_token, patch: 16, mix: weighted}
+  moiraix_enc_cpm_gift: {attention: bidirectional, readout: mask_slot, patch: 16, mix: gift}
+  moirai2:            {attention: causal,        readout: next_token, patch: 16, mix: external}
+  timesfmx_trackb_p30_nosde_gift: {attention: causal, readout: next_token, patch: 32, mix: gift}
+  chronos2:           {attention: unknown,       readout: unknown,    patch: 16, mix: external}
+  timesfm25:          {attention: causal,        readout: next_token, patch: 32, mix: external}
+
+# Bump probe (finite difference) settings.
+bump:
+  kappa: 0.5
+  stride: 1
+  batch_size: 64
+
+# GIFT-Eval datasets (train region only — see notes.md). Verified on disk.
+gift_sets:
+  - electricity/H
+  - ett1/H
+  - jena_weather/H
+  - solar/H
+  - us_births/D
+  - LOOP_SEATTLE/H
+  - bizitobs_l2c/H
+  # NOT hierarchical_sales: /W is only 234 steps (< T=320) and /D has ~22
+  # scattered NaNs per series, leaving zero NaN-free 320-step windows. Swapped
+  # for kdd_cup (air quality), which also adds a domain the rest of the set lacks.
+  - kdd_cup_2018_with_missing/H
+
+# Stress families (family, level_key). Level keys are NOT snr_* for every family.
+#
+# The block2 stress corpus is MIXED-geometry: most level files are T=400
+# (ctx 320 + H 80, matching the current stress.yaml cp=20/hp=5), and only some
+# were generated at T=320 (ctx 256 + H 64). Only the T=320 files are usable
+# here, because ctx=256/H=64 is what keeps every model AR-free in one forward
+# pass. No family_d file exists at T=320, so the handoff's
+# family_d_sine_level_shift pick is unavailable; family_b_phi replaces it.
+stress_sets:
+  - [family_a_periodic, snr_02]   # sine   -> retention_periodic (phase/amplitude)
+  - [family_a_trend, snr_02]      # trend  -> retention_trend (slope)
+  - [family_c_intermittent, p_04] # spiky/sparse
+  # AR(1), phi=0.95. INTERPRETIVE CONTROL: for a high-persistence AR(1) the
+  # Bayes-optimal forecast is x_T * phi^h -- it depends ONLY on the last context
+  # point. So a boundary-peaked saliency here is statistically CORRECT, not a
+  # vulnerability. This separates "the model is brittle at the boundary" from
+  # "the data makes the boundary genuinely informative."
+  - [family_b_phi, phi_16]
