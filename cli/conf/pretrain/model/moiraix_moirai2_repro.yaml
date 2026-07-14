@@ -1,0 +1,88 @@
+# Faithful reproduction of Salesforce/moirai-2.0-R-small.
+#   Architecture  <- config.json (https://huggingface.co/Salesforce/moirai-2.0-R-small)
+#   Recipe        <- paper arXiv:2511.11698v3
+# Trained through the unified moiraix pretrain path because the native moirai2
+# module (src/uni2ts/model/moirai2) is inference-only (no Moirai2Pretrain class).
+#
+# Differences this file FIXES vs the earlier cli/.../model/moiraix_moirai2.yaml
+# (which scored 0.1707 and diverged late):
+#   1. size          512/2048/8   -> 384/1024/6   (config.json; ~30M -> 11.4M params)
+#   2. mask_inputs   false        -> true         (native Moirai2Module: "replace
+#                                                   prediction window with learnable mask")
+#   3. mask ratio    0.7-0.95     -> 0.5          (paper: "50% of input patches ...
+#                                                   randomly masked")
+#   4. scale peek    train_scale_full_observed true -> false (paper: stats from
+#                                                   context only, no future leakage)
+# predict_next / npred=4 / causal / patch16 / optimizer already matched the paper.
+#
+# NOTE on masking pattern: the paper says "randomly" masked; MaskedPrediction here
+# masks a contiguous 50% suffix. For a scattered/variable-horizon variant instead,
+# either widen to a range (min_mask_ratio=0.15, max_mask_ratio=0.85; mean 0.5) or
+# add scattered targets via cpm_pred_p_mask_max>0. Kept literal (0.5/0.5) for repro.
+#
+# HANDOFF_MOIRAI2_PARITY.md FIXES C/D/E applied here (A/B are code-only, no config):
+#   FIX C: 50% iid patch-level masking (not chunked E[25%]) via
+#          cpm_pred_c_mask_max=1 + cpm_pred_p_fixed=0.5 (bypasses the U(0,p) draw).
+#   FIX D: scale_prefix_ratio=0.3 -> scaler stats come only from the first 30% of
+#          each (sample, variate)'s timeline, matching the paper's instance-norm.
+#   FIX E: zscore_filter_* -> drop samples whose latter-70% segment deviates too
+#          far (|z|>6 for >1% of points) from the first-30% stats.
+_target_: uni2ts.model.moiraix.MoiraiXPretrain
+module_kwargs:
+  _target_: builtins.dict
+  d_model: 384              # config.json
+  d_ff: 1024                # config.json
+  num_layers: 6             # config.json
+  patch_size: 16            # config.json
+  quantile_levels: ${as_tuple:[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]}
+  max_seq_len: 512          # config.json
+  attn_dropout_p: 0.0       # config.json (dropout disabled)
+  dropout_p: 0.0            # config.json
+  num_predict_token: 4      # config.json (multi-token: 4 future patches per position)
+  scaling: true             # config.json (instance normalization)
+  min_scale: 1.0e-5
+  causal: true              # native Moirai2Module uses packed_causal_attention_mask
+  mask_inputs: true         # native module replaces prediction window with mask token
+  predict_next: true        # forecast.py does next-step multi-token AR decoding
+  train_scale_full_observed: false   # honest context-only scaling (no future leak)
+  scale_prefix_ratio: 0.3   # FIX D: scaler stats only from first 30% of timeline
+min_patches: 2
+min_mask_ratio: 0         # paper: 50% masking
+max_mask_ratio: 0
+patch_mask_ratio: 0
+cpm_pred_c_mask_max: 1      # FIX C: chunk size 1 -> iid per-patch masking
+cpm_pred_p_mask_max: 0.5    # unused when cpm_pred_p_fixed is set; kept for val fallback
+cpm_pred_p_fixed: 0.5       # FIX C: fixed p=0.5 iid coverage, bypasses U(0, p) draw
+cpm_pred_protect_prefix_ratio: 0.3   # keep first 30% unmaskable, matching scale_prefix_ratio
+                                     # (fixes the FIX C/D interaction bug: without this, CPM
+                                     # masking ate into the scaler's visible window and
+                                     # collapsed scale to the minimum_scale floor for ~13%
+                                     # of groups, causing the moirai2_repro_parity_0 blowup)
+cpm_c_mask_max: 4
+cpm_p_mask_max: 0
+zscore_filter_prefix_ratio: 0.3   # FIX E: z-score filter, first-30% reference stats
+zscore_filter_threshold: 6.0
+zscore_filter_max_frac_exceed: 0.01
+val_min_mask_ratio: 0.3
+val_max_mask_ratio: 0.3
+val_cpm_pred_c_mask_max: 4
+val_cpm_pred_p_mask_max: 0
+val_cpm_pred_p_fixed: 0     # validation keeps the honest deterministic MaskedPrediction split
+val_cpm_c_mask_max: 4
+val_cpm_p_mask_max: 0
+max_dim: 128
+loss_func:
+  _target_: uni2ts.loss.packed.PackedQuantileMTPLoss
+  shift: true               # must agree with predict_next=true
+  clamp_loss: 50            # defense-in-depth vs residual degenerate-scale groups
+                             # (not the old clamp_loss=3, which killed tail-quantile
+                             # learning; see FIX A/D addendum in HANDOFF_MOIRAI2_PARITY.md)
+val_metric:
+  _target_: uni2ts.loss.packed.PackedNMAELoss
+lr: 1.0e-3                  # paper: AdamW lr 1e-3
+weight_decay: 1.0e-1        # paper: wd 1e-1
+beta1: 0.9                  # paper
+beta2: 0.98                 # paper
+num_training_steps: ${mul:${trainer.max_epochs},${train_dataloader.num_batches_per_epoch}}
+num_warmup_steps: 10_000    # paper: linear warmup 10k, then cosine (COSINE_WITH_RESTARTS)
+log_on_step: true

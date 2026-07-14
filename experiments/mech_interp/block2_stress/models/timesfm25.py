@@ -42,6 +42,10 @@ class TimesFM25Adapter(ForecastAdapter):
         max_horizon: int | None = None,
         device: str = "auto",
         tfm=None,
+        use_continuous_quantile_head: bool = True,
+        fix_quantile_crossing: bool = True,
+        force_flip_invariance: bool = True,
+        infer_is_positive: bool = True,
         **_ignored,
     ):
         # `None` => auto-size to the actual workload at compile time so the
@@ -49,6 +53,14 @@ class TimesFM25Adapter(ForecastAdapter):
         self.per_core_batch_size = per_core_batch_size
         self.max_context_cap = max_context_cap
         self.max_horizon = max_horizon
+        # Post-hoc head options. The defaults are 2.5's shipped inference recipe
+        # (the "polished" head). Turn them OFF to expose the raw point head, which
+        # is what a differentiable white-box path necessarily reads — needed to
+        # compare the two paths apples-to-apples.
+        self.use_continuous_quantile_head = use_continuous_quantile_head
+        self.fix_quantile_crossing = fix_quantile_crossing
+        self.force_flip_invariance = force_flip_invariance
+        self.infer_is_positive = infer_is_positive
         self._compiled_key = None
         if tfm is not None:
             # Allow injecting a pre-built (already checkpoint-loaded) model.
@@ -111,10 +123,10 @@ class TimesFM25Adapter(ForecastAdapter):
             forecast_config=configs.ForecastConfig(
                 max_context=max_context,
                 max_horizon=max_horizon,
-                infer_is_positive=True,
-                use_continuous_quantile_head=True,
-                fix_quantile_crossing=True,
-                force_flip_invariance=True,
+                infer_is_positive=self.infer_is_positive,
+                use_continuous_quantile_head=self.use_continuous_quantile_head,
+                fix_quantile_crossing=self.fix_quantile_crossing,
+                force_flip_invariance=self.force_flip_invariance,
                 return_backcast=False,
                 normalize_inputs=True,
                 per_core_batch_size=pcbs,

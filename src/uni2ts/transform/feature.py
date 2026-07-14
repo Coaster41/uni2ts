@@ -124,7 +124,10 @@ class AddObservedMask(CollectFuncMixin, Transformation):
     @staticmethod
     def _generate_observed_mask(data_entry: dict[str, Any], field: str) -> np.ndarray:
         arr = data_entry[field]
-        return ~np.isnan(arr)
+        # Treat any non-finite value (NaN *or* +/-Inf) as unobserved. Inf slips
+        # through a plain ~isnan check and later blows up normalization
+        # (inf/inf -> nan), which poisons the whole batch's loss/stats.
+        return np.isfinite(arr)
 
 
 @dataclass

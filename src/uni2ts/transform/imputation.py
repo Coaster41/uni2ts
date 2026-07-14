@@ -125,6 +125,11 @@ class ImputeTimeSeries(ApplyFuncMixin, Transformation):
 
     def _impute(self, data_entry: dict[str, Any], field: str):
         value = data_entry[field]
-        nan_entries = np.isnan(value)
-        if nan_entries.any():
+        # Impute any non-finite entry (NaN *or* +/-Inf). The imputation methods
+        # key on np.isnan, so first coerce Inf -> NaN, otherwise an Inf would
+        # survive imputation and later corrupt normalization (inf/inf -> nan).
+        non_finite = ~np.isfinite(value)
+        if non_finite.any():
+            if not np.isnan(value[non_finite]).all():
+                value = np.where(np.isfinite(value), value, np.nan)
             data_entry[field] = self.imputation_method(value)

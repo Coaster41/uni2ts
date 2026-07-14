@@ -37,17 +37,47 @@ models:
   moiraix_enc_cpm_16_1:
     adapter: moiraix
     ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraix/gift_eval_pretrain_weighted/moiraix_enc_cpm_1/HF_checkpoints/last
-  # moirai2:
-  #   adapter: moirai2
-  #   model_path: Salesforce/moirai-2.0-R-small
-  # chronos2:
-  #   adapter: chronos2
-  #   model_name: amazon/chronos-2
-  # timesfm25:
-  #   adapter: timesfm25
-  #   # `checkpoint` is the HF repo id (or local dir) passed to from_pretrained;
-  #   # defaults to the 200M torch weights, which also moves the model to cuda:0.
-  #   # checkpoint: google/timesfm-2.5-200m-pytorch
+  moiraix_dec_cpm_2:
+    adapter: moiraix
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraix/gift_eval_pretrain_weighted/moiraix_dec_cpm_2/HF_checkpoints/last
+  moiraix_moirai2:
+    adapter: moiraix
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraix_moirai2/gift_eval_pretrain_weighted_moirai2/moiraix_moirai2_1/last
+  moiraix_dec_cpm_4:
+    adapter: moiraix
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraix/gift_eval_pretrain_moirai2/moiraix_dec_cpm_4/HF_checkpoints/last
+  moiraix_enc_cpm_2:
+    adapter: moiraix
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraix/gift_eval_pretrain_moirai2/moiraix_enc_cpm_2/HF_checkpoints/last
+  # TimesFMX from-scratch checkpoints (post RMSNorm fix, 50-epoch HPO arms +
+  # the 100-epoch baseline). Univariate causal decoder, patch 32, naive AR.
+  timesfmx_hpo50_control:
+    adapter: timesfmx
+    ckpt: /srv/disk00/ctadler/timesfm/outputs/pretrain/timesfmx_baseline/gift_eval_pretrain_moirai2/timesfmx_hpo50_control_0/HF_checkpoints/epoch_49-step_50000
+  timesfmx_hpo50_relaxed:
+    adapter: timesfmx
+    ckpt: /srv/disk00/ctadler/timesfm/outputs/pretrain/timesfmx_baseline/gift_eval_pretrain_moirai2/timesfmx_hpo50_relaxed_0/HF_checkpoints/epoch_49-step_50000
+  timesfmx_hpo50_ctxnorm:
+    adapter: timesfmx
+    ckpt: /srv/disk00/ctadler/timesfm/outputs/pretrain/timesfmx_baseline/gift_eval_pretrain_moirai2/timesfmx_hpo50_ctxnorm_0/HF_checkpoints/epoch_49-step_50000
+  timesfmx_hpo50_ctxnorm_relaxed:
+    adapter: timesfmx
+    ckpt: /srv/disk00/ctadler/timesfm/outputs/pretrain/timesfmx_baseline/gift_eval_pretrain_moirai2/timesfmx_hpo50_ctxnorm_relaxed_0/HF_checkpoints/epoch_49-step_50000
+  timesfmx_baseline_5:
+    adapter: timesfmx
+    # ep96 weights (run paused at 96/100; `last` is frozen there)
+    ckpt: /srv/disk00/ctadler/timesfm/outputs/pretrain/timesfmx_baseline/gift_eval_pretrain_moirai2/timesfmx_baseline_5/HF_checkpoints/last
+  moirai2:
+    adapter: moirai2
+    model_path: Salesforce/moirai-2.0-R-small
+  chronos2:
+    adapter: chronos2
+    model_name: amazon/chronos-2
+  timesfm25:
+    adapter: timesfm25
+    # `checkpoint` is the HF repo id (or local dir) passed to from_pretrained;
+    # defaults to the 200M torch weights, which also moves the model to cuda:0.
+    # checkpoint: google/timesfm-2.5-200m-pytorch
   # patchtst_fm:
   #   adapter: patchtst_fm
   #   ckpt_path: ibm-granite/granite-timeseries-patchtst-fm-r1
@@ -57,3 +87,40 @@ models:
   #   adapter: toto
   #   model_id: Datadog/Toto-2.0-22m   # quantile-head Toto 2.0 (not sampling-based)
   #   # decode_block_size: 768
+  # Track A synthetic fine-tune arms (HANDOFF_SYNTH_DATA.md §A.2): warm-started
+  # from hpo50_relaxed ep49, 8 epochs at lr=1e-4; synth = +12% synth_stress_v0.
+  timesfmx_synthft_synth:
+    adapter: timesfmx
+    ckpt: /srv/disk00/ctadler/timesfm/outputs/pretrain/timesfmx_baseline/gift_eval_pretrain_moirai2_synthstress/timesfmx_synthft_synth_0/HF_checkpoints/last
+  timesfmx_synthft_control:
+    adapter: timesfmx
+    ckpt: /srv/disk00/ctadler/timesfm/outputs/pretrain/timesfmx_baseline/gift_eval_pretrain_moirai2/timesfmx_synthft_control_0/HF_checkpoints/last
+  # Track B from-scratch retrains (HANDOFF_SYNTH_DATA.md §4): 50ep control
+  # recipe on p20/p30 x +-SDE corpus mixtures.
+  timesfmx_trackb_p20_sde:
+    adapter: timesfmx
+    ckpt: /srv/disk00/ctadler/timesfm/outputs/pretrain/timesfmx_baseline/gift_eval_pretrain_trackb_p20_sde/timesfmx_trackb_p20_sde_0/HF_checkpoints/last
+  timesfmx_trackb_p20_nosde:
+    adapter: timesfmx
+    ckpt: /srv/disk00/ctadler/timesfm/outputs/pretrain/timesfmx_baseline/gift_eval_pretrain_trackb_p20_nosde/timesfmx_trackb_p20_nosde_0/HF_checkpoints/last
+  timesfmx_trackb_p30_sde:
+    adapter: timesfmx
+    ckpt: /srv/disk00/ctadler/timesfm/outputs/pretrain/timesfmx_baseline/gift_eval_pretrain_trackb_p30_sde/timesfmx_trackb_p30_sde_0/HF_checkpoints/last
+  timesfmx_trackb_p30_nosde:
+    adapter: timesfmx
+    ckpt: /srv/disk00/ctadler/timesfm/outputs/pretrain/timesfmx_baseline/gift_eval_pretrain_trackb_p30_nosde/timesfmx_trackb_p30_nosde_0/HF_checkpoints/last
+  # FIX G (HANDOFF_MOIRAI2_PARITY.md): p30_nosde mix + GIFT-Eval train split @10%.
+  timesfmx_trackb_p30_nosde_gift:
+    adapter: timesfmx
+    ckpt: /srv/disk00/ctadler/timesfm/outputs/pretrain/timesfmx_baseline/gift_eval_pretrain_trackb_p30_nosde_gift/timesfmx_trackb_p30_nosde_gift_0/HF_checkpoints/last
+  # enc_cpm_2 recipe x FIX G datamix (exp-008): in-house best, WQL 0.1118.
+  moiraix_enc_cpm_gift:
+    adapter: moiraix
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraix/gift_eval_pretrain_trackb_p30_nosde_gift/moiraix_enc_cpm_gift_1/HF_checkpoints/last
+  # Faithful moirai2-recipe repro: causal + TRUE next-token readout (npt=4),
+  # on the same gift_eval_pretrain_moirai2 mix as moiraix_enc_cpm_2 /
+  # moiraix_dec_cpm_4. Third arm of the block3 readout factorial: those two are
+  # mask-slot readout (predict_next=false), this one reads the last context patch.
+  moirai2_repro_0:
+    adapter: moiraix
+    ckpt: /srv/disk00/ctadler/uni2ts/outputs/pretrain/moiraix_moirai2_repro/gift_eval_pretrain_moirai2/moirai2_repro_0/HF_checkpoints/last

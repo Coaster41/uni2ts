@@ -35,7 +35,7 @@ from .reshape import (
     SequencifyField,
     Transpose,
 )
-from .task import EvalMaskedPrediction, ExtendMask, MaskedPrediction, ContextPatchMasking, ContiguousPatchMasking, ContiguousPatchPrediction
+from .task import EvalMaskedPrediction, ExtendMask, MaskedPrediction, ContextPatchMasking, ContiguousPatchMasking, ContiguousPatchPrediction, ZScoreSampleFilter
 
 __all__ = [
     "AddObservedMask",
@@ -61,6 +61,7 @@ __all__ = [
     "ContiguousPatchMasking",
     "ContiguousPatchPrediction",
     "ContextPatchMasking",
+    "ZScoreSampleFilter",
     "PackCollection",
     "PackFields",
     "Pad",

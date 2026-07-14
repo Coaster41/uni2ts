@@ -72,18 +72,26 @@ class PackedQuantileMTPLoss(PackedQuantileLoss):
 
     ``shift=True`` reproduces the former ``PackedQuantileDecoderMAELoss`` and
     ``shift=False`` (with npt == 1) reproduces ``PackedQuantileEncoderMAELoss``.
+
+    ``clamp_loss`` (default ``None`` = unclamped) is a safety net against rare
+    degenerate-scale groups (e.g. a packed-sample scaler starved of observed
+    context; see FIX D interaction bug in HANDOFF_MOIRAI2_PARITY.md) rather
+    than the old hardcoded ``clamp_loss=3``, which was tight enough to zero
+    the gradient on legitimate tail/spike targets. Set it only as a loose
+    outlier guard (e.g. 20-50), not a per-token accuracy target.
     """
 
     error_func = torch.nn.L1Loss(reduction="none")
-    clamp_loss = 3
 
     def __init__(
         self,
         quantile_levels: tuple[Float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9],
         shift: bool = False,
+        clamp_loss: Optional[float] = None,
     ):
         super().__init__(quantile_levels)
         self.shift = shift
+        self.clamp_loss = clamp_loss
 
     def _loss_func(
         self,
@@ -133,7 +141,6 @@ class PackedQuantileMTPLoss(PackedQuantileLoss):
             indicator, quantile_levels * errors, (1 - quantile_levels) * errors
         )
         # aggregate over the quantile axis
-        quantile_loss = quantile_loss.clamp(max=self.clamp_loss)
         return quantile_loss.mean(dim=-2)
 
     def reduce_loss(
@@ -149,14 +156,25 @@ class PackedQuantileMTPLoss(PackedQuantileLoss):
         patch_size = observed_mask.shape[-1]
         num_predict_token = loss.shape[-1] // patch_size
         mask = prediction_mask.unsqueeze(-1) * observed_mask
-        # ASSUMING UNIVARIATE WITH NO COVARIATES
+
+        # Windows of npt consecutive positions starting at t must all belong to
+        # the same (sample_id, variate_id) as position t, otherwise the target
+        # patches were packed from a different series/variate and the window
+        # is pure gradient noise (see FIX B in HANDOFF_MOIRAI2_PARITY.md).
+        ids = sample_id * (int(variate_id.max().item()) + 1) + variate_id
+        ids_unfold = ids.unfold(-1, num_predict_token, 1)
+        # *batch (seq_len-num_pred_tok+1) num_pred_tok
+        same_id = ids_unfold == ids_unfold[..., :1]
+
         mask = mask.unfold(-2, num_predict_token, 1)
+        mask = mask * same_id.unsqueeze(-2)
         if self.shift:
             mask = mask[..., 1:, :, :]
         mask = rearrange(
             mask, "... patch_size num_pred_token -> ... (num_pred_token patch_size)"
         )
-        loss = loss.clamp(max=self.clamp_loss)
+        if self.clamp_loss is not None:
+            loss = loss.clamp(max=self.clamp_loss)
         masked_loss = (loss * mask).sum()
         num_active = mask.sum().clamp(min=1)  # avoid division by zero
         return masked_loss / num_active

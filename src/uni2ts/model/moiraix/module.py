@@ -85,6 +85,7 @@ class MoiraiXModule(
         mask_inputs: bool = True,
         predict_next: bool = False,
         train_scale_full_observed: bool = False,
+        scale_prefix_ratio: Optional[float] = None,
     ):
         """
         :param d_model: model hidden dimensions
@@ -107,6 +108,13 @@ class MoiraiXModule(
             only while the module is in training mode (``self.training``); validation,
             inference and forecasting always use the honest context-only statistics.
             Default (False) preserves the original context-only behavior.
+        :param scale_prefix_ratio: if set, restricts the scaler's visible context
+            further to only the first ``scale_prefix_ratio`` fraction of each
+            (sample, variate)'s timeline (by ``time_id``), instead of every
+            unmasked context patch scattered across the whole window. Matches the
+            Moirai2 paper's instance-norm statistics computed "solely from the
+            first 30% of the time series" (see FIX D in
+            HANDOFF_MOIRAI2_PARITY.md). ``None`` preserves the original behavior.
         """
         super().__init__()
         self.d_model = d_model
@@ -119,6 +127,7 @@ class MoiraiXModule(
         self.mask_inputs = mask_inputs
         self.predict_next = predict_next
         self.train_scale_full_observed = train_scale_full_observed
+        self.scale_prefix_ratio = scale_prefix_ratio
         self.quantile_levels = quantile_levels
         self.num_quantiles = len(quantile_levels)
 
@@ -163,6 +172,23 @@ class MoiraiXModule(
             output_dims=num_predict_token * self.num_quantiles * patch_size,
         )
         self.get_reprs = False
+
+    def _prefix_mask(
+        self,
+        sample_id: Int[torch.Tensor, "*batch seq_len"],
+        variate_id: Int[torch.Tensor, "*batch seq_len"],
+        time_id: Int[torch.Tensor, "*batch seq_len"],
+    ) -> Bool[torch.Tensor, "*batch seq_len"]:
+        """True for positions within the first ``scale_prefix_ratio`` of their
+        (sample, variate)'s timeline, per ``time_id``."""
+        id_mask = torch.logical_and(
+            torch.eq(sample_id.unsqueeze(-1), sample_id.unsqueeze(-2)),
+            torch.eq(variate_id.unsqueeze(-1), variate_id.unsqueeze(-2)),
+        )
+        time_id_bc = time_id.unsqueeze(-2).expand_as(id_mask)
+        group_max_time = time_id_bc.masked_fill(~id_mask, -1).amax(dim=-1)
+        cutoff = torch.ceil((group_max_time + 1) * self.scale_prefix_ratio).clamp(min=1)
+        return time_id < cutoff
 
     def _embed(
         self,
@@ -218,6 +244,10 @@ class MoiraiXModule(
                 scaler_observed_mask = observed_mask
             else:
                 scaler_observed_mask = observed_mask * ~prediction_mask.unsqueeze(-1)
+            if self.scale_prefix_ratio is not None:
+                scaler_observed_mask = scaler_observed_mask & self._prefix_mask(
+                    sample_id, variate_id, time_id
+                ).unsqueeze(-1)
             loc, scale = self.scaler(
                 target,
                 scaler_observed_mask,

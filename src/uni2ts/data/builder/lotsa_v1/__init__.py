@@ -29,6 +29,13 @@ from .gluonts_elec import GluonTSElecDatasetBuilder
 from .gluonts_wiki import GluonTSWikiDatasetBuilder
 from .chronos_synth import ChronosSyntheticDatasetBuilder
 from .gift_eval_test import GiftEvalTestDatasetBuilder
+from .gift_eval_train import GiftEvalTrainSplitDatasetBuilder
+from .synth_stress import SynthStressDatasetBuilder
+from .synth_trackb import (
+    SynthBackboneDatasetBuilder,
+    SynthSarima2DatasetBuilder,
+    SynthSDEDatasetBuilder,
+)
 
 __all__ = [
     "LOTSADatasetBuilder",
@@ -44,8 +51,13 @@ __all__ = [
     "ProEnFoDatasetBuilder",
     "SubseasonalDatasetBuilder",
     "ChronosSyntheticDatasetBuilder",
+    "GiftEvalTrainSplitDatasetBuilder",
+    "SynthStressDatasetBuilder",
+    "SynthBackboneDatasetBuilder",
+    "SynthSDEDatasetBuilder",
+    "SynthSarima2DatasetBuilder",
     "GluonTSSubDatasetBuilder",
-    "GluonTSElecDatasetBuilder"
-    "GluonTSWikiDatasetBuilder"
-    "GiftEvalTestDatasetBuilder"
+    "GluonTSElecDatasetBuilder",
+    "GluonTSWikiDatasetBuilder",
+    "GiftEvalTestDatasetBuilder",
 ]

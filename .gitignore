@@ -179,6 +179,8 @@ experiments/mech_interp/.cache/
 experiments/mech_interp/block2_stress/data
 experiments/mech_interp/block2_stress/results
 experiments/mech_interp/block2_stress/figures
+**/results/
+.npz
 
 
 notebooks/

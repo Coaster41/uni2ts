@@ -117,8 +117,12 @@ class PackedStdScaler(PackedScaler):
         )
         var = safe_div(var, (tobs - self.correction))
         scale = torch.sqrt(var + self.minimum_scale)
-        loc[sample_id == 0] = 0
-        scale[sample_id == 0] = 1
+        # Out-of-place: an in-place write here mutates the sqrt/div outputs and
+        # breaks backward through `target` (input-gradient work, e.g. adversarial
+        # attacks). Values are identical.
+        pad = (sample_id == 0).unsqueeze(-1)
+        loc = torch.where(pad, torch.zeros_like(loc), loc)
+        scale = torch.where(pad, torch.ones_like(scale), scale)
         return loc, scale
 
 
@@ -150,6 +154,7 @@ class PackedAbsMeanScaler(PackedScaler):
         scale = safe_div(scale, tobs)
         loc = torch.zeros_like(scale)
 
-        loc[sample_id == 0] = 0
-        scale[sample_id == 0] = 1
+        # Out-of-place — see PackedStdScaler._get_loc_scale.
+        pad = (sample_id == 0).unsqueeze(-1)
+        scale = torch.where(pad, torch.ones_like(scale), scale)
         return loc, scale

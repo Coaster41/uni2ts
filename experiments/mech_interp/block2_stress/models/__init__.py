@@ -27,6 +27,7 @@ _REGISTRY: dict[str, tuple[str, str]] = {
     "moirai2": ("moirai2", "Moirai2Adapter"),
     "chronos2": ("chronos2", "Chronos2Adapter"),
     "timesfm25": ("timesfm25", "TimesFM25Adapter"),
+    "timesfmx": ("timesfmx", "TimesFMXAdapter"),
     "patchtst_fm": ("patchtst_fm", "PatchTSTFMAdapter"),
     "toto": ("toto", "TotoAdapter"),
 }

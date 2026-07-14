@@ -13,7 +13,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
@@ -43,6 +43,64 @@ def _observed_patch_mean(
     flat_cnt = obs.reshape(var, -1).sum(axis=1)
     fill = np.where(flat_cnt > 0, flat_sum / np.maximum(flat_cnt, 1.0), 0.0)
     return fill.reshape((var,) + (1,) * (arr.ndim - 1))
+
+
+@dataclass
+class ZScoreSampleFilter(Transformation):
+    """Drop samples whose latter segment deviates too much from the first
+    ``prefix_ratio`` segment's stats (paper §3.2: samples are dropped "if the
+    latter 70% segment exhibits significant statistical deviation" from the
+    first-30% stats; see FIX E in HANDOFF_MOIRAI2_PARITY.md).
+
+    Raises ``ValueError`` on rejection, which ``TimeSeriesDataset.__getitem__``
+    catches and turns into a fresh redraw (see its ``_MAX_RETRIES`` loop).
+
+    Some real (non-synthetic) series are *structurally* non-stationary — a
+    strong trend or regime change means every crop of that series trips the
+    filter, independent of the random redraw. Left unguarded this exhausts
+    ``TimeSeriesDataset._MAX_RETRIES`` and crashes the run (observed empirically:
+    ~0.2% of GIFT-Eval-mixture indices fail 50/50 retries at threshold=6/1%).
+    ``max_consecutive_rejects`` is a per-worker circuit breaker: after that many
+    back-to-back rejections *by this transform instance* (i.e. within one
+    ``TimeSeriesDataset`` retry loop, since retries call the same transform
+    object synchronously) it accepts the sample instead of raising again, so a
+    single pathological series can never take down the whole dataloader.
+    """
+
+    target_field: str = "target"
+    prefix_ratio: float = 0.3
+    z_threshold: float = 8.0
+    max_frac_exceed: float = 0.2
+    max_consecutive_rejects: int = 10
+    _consecutive_rejects: int = field(default=0, init=False, repr=False, compare=False)
+
+    def __call__(self, data_entry: dict[str, Any]) -> dict[str, Any]:
+        target: Float[np.ndarray, "var time"] = data_entry[self.target_field]
+        time = target.shape[1]
+        prefix_len = int(time * self.prefix_ratio)
+        if prefix_len < 1 or prefix_len >= time:
+            return data_entry
+
+        prefix = target[:, :prefix_len]
+        suffix = target[:, prefix_len:]
+        mean = prefix.mean(axis=1, keepdims=True)
+        std = prefix.std(axis=1, keepdims=True)
+        std = np.where(std < 1e-8, 1e-8, std)
+        z = np.abs((suffix - mean) / std)
+        frac_exceed = float((z > self.z_threshold).mean())
+
+        if frac_exceed > self.max_frac_exceed:
+            if self._consecutive_rejects >= self.max_consecutive_rejects:
+                self._consecutive_rejects = 0
+                return data_entry
+            self._consecutive_rejects += 1
+            raise ValueError(
+                f"ZScoreSampleFilter: {frac_exceed:.4f} of latter-segment points "
+                f"exceed |z|>{self.z_threshold} vs first-{self.prefix_ratio:.0%} "
+                "stats; resampling."
+            )
+        self._consecutive_rejects = 0
+        return data_entry
 
 
 @dataclass
@@ -153,20 +211,46 @@ class ContiguousPatchPrediction(Transformation):
     prediction_mask_field: str = "prediction_mask"
     c_mask_max: int = 4
     p_mask_max: float = 0.5
+    #: When set, bypasses the ``p ~ U(0, p_mask_max)`` draw and masks each
+    #: chunk independently with this fixed probability (paper parity: iid
+    #: patch masking at exactly 50% coverage uses ``p_fixed=0.5,
+    #: c_mask_max=1``; see FIX C in HANDOFF_MOIRAI2_PARITY.md).
+    p_fixed: float | None = None
+    #: Fraction of the FIRST context patches (from position 0) that are never
+    #: eligible for masking, matching the module's ``scale_prefix_ratio``
+    #: (paper: stats "solely from the first 30%... reserving the subsequent
+    #: 70%" for the task). Without this, CPM masks uniformly from position 0,
+    #: which can strip every patch the scaler is allowed to see and collapse
+    #: its scale to the ``minimum_scale`` floor (see FIX D interaction bug in
+    #: HANDOFF_MOIRAI2_PARITY.md addendum: 13% of groups had zero scaler-visible
+    #: points, causing the moirai2_repro_parity_0 loss blowup).
+    protect_prefix_ratio: float = 0.0
 
     def __call__(self, data_entry: dict[str, Any]) -> dict[str, Any]:
         prediction_mask = data_entry[self.prediction_mask_field]
         context_patches = int((~prediction_mask[0]).sum())
+        protect_len = (
+            max(1, int(context_patches * self.protect_prefix_ratio))
+            if self.protect_prefix_ratio > 0 and context_patches > 0
+            else 0
+        )
+        maskable_patches = context_patches - protect_len
 
         c_mask = np.random.randint(1, self.c_mask_max + 1)
-        p_mask = np.random.uniform(0.0, self.p_mask_max)
-        n_slots = context_patches // c_mask
+        p_mask = (
+            self.p_fixed
+            if self.p_fixed is not None
+            else np.random.uniform(0.0, self.p_mask_max)
+        )
+        n_slots = maskable_patches // c_mask
 
         if n_slots > 0 and p_mask > 0:
             slot_mask = np.random.binomial(1, p_mask, size=n_slots).astype(bool)
             patch_mask = np.repeat(slot_mask, c_mask)        # (n_slots * c_mask,)
             t = patch_mask.shape[0]
-            prediction_mask[:, :t] |= patch_mask[np.newaxis, :]
+            prediction_mask[:, protect_len : protect_len + t] |= patch_mask[
+                np.newaxis, :
+            ]
 
         return data_entry
 

@@ -47,6 +47,7 @@ from uni2ts.transform import (
     FlatPackCollection,
     FlatPackFields,
     GetPatchSize,
+    Identity,
     ImputeTimeSeries,
     MaskedPrediction,
     PackFields,
@@ -55,6 +56,7 @@ from uni2ts.transform import (
     SampleDimension,
     SelectFields,
     Transformation,
+    ZScoreSampleFilter,
 )
 
 from .module import MoiraiXModule
@@ -94,6 +96,11 @@ class MoiraiXPretrain(L.LightningModule):
         cpm_p_mask_max: float = 0.0,
         cpm_pred_c_mask_max: int = 4,
         cpm_pred_p_mask_max: float = 0.0,
+        cpm_pred_p_fixed: Optional[float] = None,
+        cpm_pred_protect_prefix_ratio: float = 0.0,
+        zscore_filter_prefix_ratio: Optional[float] = None,
+        zscore_filter_threshold: float = 6.0,
+        zscore_filter_max_frac_exceed: float = 0.01,
         num_samples: int = 100,
         beta1: float = 0.9,
         beta2: float = 0.98,
@@ -105,6 +112,7 @@ class MoiraiXPretrain(L.LightningModule):
         val_cpm_p_mask_max: Optional[float] = None,
         val_cpm_pred_c_mask_max: Optional[int] = None,
         val_cpm_pred_p_mask_max: Optional[float] = None,
+        val_cpm_pred_p_fixed: Optional[float] = None,
         lr: float = 1e-3,
         weight_decay: float = 1e-2,
         log_on_step: bool = False,
@@ -394,6 +402,8 @@ class MoiraiXPretrain(L.LightningModule):
         self, min_mask_ratio: float, max_mask_ratio: float,
             c_pred_mask_max: float, p_pred_mask_max: float,
             c_mask_max: float, p_mask_max: float,
+            p_pred_fixed: Optional[float] = None,
+            p_pred_protect_prefix_ratio: float = 0.0,
     ) -> Transformation:
         """Build the patch / mask / pack pipeline used for both train and val."""
         return (
@@ -421,6 +431,15 @@ class MoiraiXPretrain(L.LightningModule):
                 output_field="target",
                 fields=("target",),
                 feat=False,
+            )
+            + (
+                ZScoreSampleFilter(
+                    prefix_ratio=self.hparams.zscore_filter_prefix_ratio,
+                    z_threshold=self.hparams.zscore_filter_threshold,
+                    max_frac_exceed=self.hparams.zscore_filter_max_frac_exceed,
+                )
+                if self.hparams.zscore_filter_prefix_ratio is not None
+                else Identity()
             )
             + PackFields(
                 output_field="past_feat_dynamic_real",
@@ -472,6 +491,8 @@ class MoiraiXPretrain(L.LightningModule):
             + ContiguousPatchPrediction(
                 c_mask_max=c_pred_mask_max,
                 p_mask_max=p_pred_mask_max,
+                p_fixed=p_pred_fixed,
+                protect_prefix_ratio=p_pred_protect_prefix_ratio,
             )
             + ContiguousPatchMasking(
                 fields=("target",),
@@ -504,7 +525,9 @@ class MoiraiXPretrain(L.LightningModule):
             return self._build_transform(
                 self.hparams.min_mask_ratio, self.hparams.max_mask_ratio,
                 self.hparams.cpm_pred_c_mask_max, self.hparams.cpm_pred_p_mask_max,
-                self.hparams.cpm_c_mask_max, self.hparams.cpm_p_mask_max
+                self.hparams.cpm_c_mask_max, self.hparams.cpm_p_mask_max,
+                p_pred_fixed=self.hparams.cpm_pred_p_fixed,
+                p_pred_protect_prefix_ratio=self.hparams.cpm_pred_protect_prefix_ratio,
             )
 
         return defaultdict(lambda: default_train_transform)
@@ -519,6 +542,7 @@ class MoiraiXPretrain(L.LightningModule):
                 p_pred_mask_max=self.hparams.val_cpm_pred_p_mask_max if self.hparams.val_cpm_pred_p_mask_max is not None else self.hparams.cpm_pred_p_mask_max,
                 c_mask_max=self.hparams.val_cpm_c_mask_max if self.hparams.val_cpm_c_mask_max is not None else self.hparams.cpm_c_mask_max,
                 p_mask_max=self.hparams.val_cpm_p_mask_max if self.hparams.val_cpm_p_mask_max is not None else self.hparams.cpm_p_mask_max,
+                p_pred_fixed=self.hparams.val_cpm_pred_p_fixed if self.hparams.val_cpm_pred_p_fixed is not None else self.hparams.cpm_pred_p_fixed,
             )
 
         return defaultdict(lambda: default_val_transform)

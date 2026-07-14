@@ -19,6 +19,22 @@ def _to_qhb(arr: np.ndarray, n_q: int, horizon: int) -> np.ndarray:
     arr = np.asarray(arr, dtype=np.float32)
     if arr.ndim == 2:  # [Q, H] or [H, Q] for a single series
         arr = arr[None]
+    # chronos-2 emits [b, Q, 1, H]: a univariate target axis every other adapter
+    # squeezes. Drop any size-1 axis that is neither the batch nor the quantile
+    # axis, or the result carries a stray dim and downstream `fq[:, 4, :]`
+    # silently yields [n, 1, H] instead of [n, H].
+    while arr.ndim > 3:
+        drop = next(
+            (
+                ax
+                for ax in range(1, arr.ndim)
+                if arr.shape[ax] == 1 and arr.shape[ax] != n_q
+            ),
+            None,
+        )
+        if drop is None:
+            break
+        arr = np.squeeze(arr, axis=drop)
     # arr is now 3-D; figure out which axis is the quantile axis.
     if arr.shape[-1] == n_q and arr.shape[1] == horizon:  # [b, H, Q]
         arr = arr.transpose(0, 2, 1)
